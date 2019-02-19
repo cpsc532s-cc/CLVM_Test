@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import numpy as np
+from variational_methods import log_rect
 
 class MNISTDeconvDecoder1(nn.Module):
     def __init__(self):
@@ -24,7 +25,7 @@ class MNISTDeconvDecoder1(nn.Module):
         feature2 = self.relu(self.deconv2(feature1))
         means = self.means_conv(feature2)
         vars = self.vars_conv(feature2)
-        return means.view(-1, self.output_size()), vars.view(-1, self.output_size())
+        return means.view(-1, self.output_size()), log_rect(vars.view(-1, self.output_size()))
 
 class MNISTDeconvDecoder2(nn.Module):
     def __init__(self):
@@ -55,7 +56,7 @@ class MNISTDeconvDecoder2(nn.Module):
             feature = self.relu(deconv(feature))
         means = self.means_conv(feature)
         vars = self.vars_conv(feature)
-        return means.view(-1, self.output_size()), vars.view(-1, self.output_size())
+        return means.view(-1, self.output_size()), log_rect(vars.view(-1, self.output_size()))
 
 if __name__ == "__main__":
     input_t = torch.FloatTensor(np.arange(8)).view(1,8,1,1)
