@@ -12,4 +12,8 @@ def load_mnist():
 if __name__ == "__main__":
     mnist = load_mnist()
     print(mnist.shape)
-    viz.show_img(mnist[0])
+    #viz.show_img(mnist[0])
+    ds = viz.DisplayStream()
+    for i in range(1000):
+        ds.show_img(mnist[i])
+        ds.pause(0.1)
