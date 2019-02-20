@@ -6,12 +6,12 @@ from variational_methods import log_rect
 class MNISTDeconvDecoder1(nn.Module):
     def __init__(self):
         super(MNISTDeconvDecoder1, self).__init__()
-        self.deconv1 = nn.ConvTranspose2d(8, 4, 3)
+        self.deconv1 = nn.ConvTranspose2d(8, 8, 3, bias=True)
         self.relu = nn.ReLU()
-        self.deconv2 = nn.ConvTranspose2d(4, 4, 3)
+        self.deconv2 = nn.ConvTranspose2d(8, 8, 3, bias=True)
         self.relu = nn.ReLU()
-        self.means_conv = nn.Conv2d(4, 4, 1)
-        self.vars_conv = nn.Conv2d(4, 4, 1)
+        self.means_conv = nn.Conv2d(8, 4, 1, bias=True)
+        self.vars_conv = nn.Conv2d(8, 4, 1, bias=True)
 
     def input_size(self):
         return 8
@@ -33,20 +33,20 @@ class MNISTDeconvDecoder2(nn.Module):
         self.relu = nn.ReLU()
         self.deconvs = []
         # input 5
-        self.deconvs.append(nn.ConvTranspose2d(4, 4, 3, stride=2))
+        self.deconvs.append(nn.ConvTranspose2d(4, 4, 3, bias=True, stride=2))
         self.deconvs.append(nn.ReLU())
         # 11
-        self.deconvs.append(nn.ConvTranspose2d(4, 2, 3, stride=2))
+        self.deconvs.append(nn.ConvTranspose2d(4, 4, 3, bias=True, stride=2))
         self.deconvs.append(nn.ReLU())
-        self.deconvs.append(nn.ConvTranspose2d(2, 2, 4))
+        self.deconvs.append(nn.ConvTranspose2d(4, 4, 4, bias=True))
         self.deconvs.append(nn.ReLU())
         # 25
-        self.deconvs.append(nn.ConvTranspose2d(2, 2, 5))
+        self.deconvs.append(nn.ConvTranspose2d(4, 4, 5, bias=True))
         self.deconvs.append(nn.ReLU())
         self.deconvs_list = nn.ModuleList(self.deconvs)
         # 29
-        self.means_conv = nn.Conv2d(2, 1, 3)
-        self.vars_conv = nn.Conv2d(2, 1, 3)
+        self.means_conv = nn.Conv2d(4, 1, 3, bias=True)
+        self.vars_conv = nn.Conv2d(4, 1, 3, bias=True)
         # 28
 
     def input_size(self):

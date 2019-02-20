@@ -7,6 +7,7 @@ from torch import FloatTensor as FT
 
 def log_rect(x):
     x = t.where(x > 0,t.log(1+f.relu(x)),x)
+    x = f.relu(x+7)-7
     return x
 
 def gauss_log_p(param,x):
