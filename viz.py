@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 def show_img(img):
-    plt.imshow(img)
+    plt.imshow(img,cmap="grey")
     plt.show()
 
 class DisplayStream():
@@ -10,7 +10,7 @@ class DisplayStream():
 
     def show_img(self, img):
         plt.cla()
-        plt.imshow(img)
+        plt.imshow(img,cmap="gray")
         plt.pause(0.001)
 
     def pause(self, dt):
