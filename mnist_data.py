@@ -13,7 +13,14 @@ if __name__ == "__main__":
     mnist = load_mnist()
     print(mnist.shape)
     #viz.show_img(mnist[0])
+    """
     ds = viz.DisplayStream()
     for i in range(1000):
         ds.show_img(mnist[i])
         ds.pause(0.1)
+    """
+
+    ds = viz.ImageSaver("./figs/run1")
+    for i in range(100):
+        ds.save_img(mnist[i])
+    ds.make_gif()
