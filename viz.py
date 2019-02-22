@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from scipy.misc import imsave
 import os, errno
+import subprocess
 
 def mkdir(directory):
     try:
@@ -30,14 +31,14 @@ class ImageSaver():
         self.dir_path = dir_path
         self.img_dir_path = os.path.join(self.dir_path, "imgs/")
         mkdir(self.dir_path)
-        mkdir(self.dir_path)
+        mkdir(self.img_dir_path)
         self.count = 0
 
     def save_img(self, img):
-        path = os.path.join(img_dir_path, "img{}.png".format(str(self.count).zfill(3))))
+        path = os.path.join(self.img_dir_path, "img{}.png".format(str(self.count).zfill(3)))
         imsave(path, img)
         self.count+=1
 
-    def make_gif(self):
-        subprocess.call([ 'convert', '-loop', '0', '-delay', '50', self.img_dir_path, os.path.join(self.dir_path, "output.gif")])
+    def make_gif(self, delay):
+        subprocess.call([ 'convert', '-loop', '0', '-delay', str(delay), os.path.join(self.img_dir_path, "img*.png"), os.path.join(self.dir_path, "output.gif")])
 
