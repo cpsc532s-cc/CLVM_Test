@@ -7,9 +7,9 @@ class MNISTDeconvDecoder1(nn.Module):
     def __init__(self):
         super(MNISTDeconvDecoder1, self).__init__()
         self.deconv1 = nn.ConvTranspose2d(8, 8, 3, bias=True)
-        self.relu = nn.ReLU()
+        self.relu = nn.LeakyReLU()
         self.deconv2 = nn.ConvTranspose2d(8, 8, 3, bias=True)
-        self.relu = nn.ReLU()
+        self.relu = nn.LeakyReLU()
         self.means_conv = nn.Conv2d(8, 4, 1, bias=True)
         self.vars_conv = nn.Conv2d(8, 4, 1, bias=True)
 
@@ -30,23 +30,24 @@ class MNISTDeconvDecoder1(nn.Module):
 class MNISTDeconvDecoder2(nn.Module):
     def __init__(self):
         super(MNISTDeconvDecoder2, self).__init__()
-        self.relu = nn.ReLU()
+        val = 16
+        self.relu = nn.LeakyReLU()
         self.deconvs = []
         # input 5
-        self.deconvs.append(nn.ConvTranspose2d(4, 4, 3, bias=True, stride=2))
-        self.deconvs.append(nn.ReLU())
+        self.deconvs.append(nn.ConvTranspose2d(4, val, 3, bias=True, stride=2))
+        self.deconvs.append(nn.LeakyReLU())
         # 11
-        self.deconvs.append(nn.ConvTranspose2d(4, 4, 3, bias=True, stride=2))
-        self.deconvs.append(nn.ReLU())
-        self.deconvs.append(nn.ConvTranspose2d(4, 4, 4, bias=True))
-        self.deconvs.append(nn.ReLU())
+        self.deconvs.append(nn.ConvTranspose2d(val, val, 3, bias=True, stride=2))
+        self.deconvs.append(nn.LeakyReLU())
+        self.deconvs.append(nn.ConvTranspose2d(val, val, 4, bias=True))
+        self.deconvs.append(nn.LeakyReLU())
         # 25
-        self.deconvs.append(nn.ConvTranspose2d(4, 4, 5, bias=True))
-        self.deconvs.append(nn.ReLU())
+        self.deconvs.append(nn.ConvTranspose2d(val, val, 5, bias=True))
+        self.deconvs.append(nn.LeakyReLU())
         self.deconvs_list = nn.ModuleList(self.deconvs)
         # 29
-        self.means_conv = nn.Conv2d(4, 1, 3, bias=True)
-        self.vars_conv = nn.Conv2d(4, 1, 3, bias=True)
+        self.means_conv = nn.Conv2d(val, 1, 3, bias=True)
+        self.vars_conv = nn.Conv2d(val, 1, 3, bias=True)
         # 28
 
     def input_size(self):
