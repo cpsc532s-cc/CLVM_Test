@@ -1,23 +1,36 @@
-
+from math import ceil
 a = [i for i in range(50)]
 b = [i for i in range(50)]
-window = 2
-index = 0
-extra=4
-ds = 2
-offset = (index-window) % ds
-sub_a = a[index//ds:(index+extra+window)//ds] 
-c = ["x"]*window+["_"]*50
-print(sub_a)
-print(offset)
-print(ds+index-offset)
-c[(ds-offset)%ds+index:index+extra+window:ds] = "*"*len(c[(ds-offset)%ds+index:index+extra+window:ds])
-d = c[index:index+extra+window]
-print(c)
-c[index:index+extra+window] = "*"*len(c[index:index+extra+window])
-print(c)
-d[(ds-offset)%ds::ds] = sub_a
-print(d)
+
+for i in range(8):
+    for j in range(8):
+        for k in range(8):
+            window = i
+            #print(window)
+            index = j
+            #print(index)
+            extra = k
+            #print(extra)
+            ds = 5
+            offset = (index-window) % ds
+            ri = (index+offset)//ds
+            l = len(range((ds-offset)%ds,extra+window,ds))
+            li = ri+l
+            sub_a = a[ri:li]
+            #sub_a = a[(index+offset)//ds:ceil((index+extra+window+phase)/ds)] 
+            c = ["x"]*window+["_"]*50
+            #print(sub_a)
+            c[(ds-offset)%ds+index:index+extra+window:ds] = "*"*len(c[(ds-offset)%ds+index:index+extra+window:ds])
+            d = c[index:index+extra+window]
+            #i give up
+            c_ = [x for x in c]
+            c[index:index+extra+window] = "*"*len(c[index:index+extra+window])
+            try:
+                d[(ds-offset)%ds::ds] = sub_a
+            except Exception:
+                print(window)
+                print(index)
+                print(extra)
 
 
 
