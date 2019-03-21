@@ -95,11 +95,11 @@ class MultiTimescaleCLVM(object):
         self.embedding = embedding
         self.layers = []
         curr_length = data.shape[0]
+        #Generate latent variables
         for i, (downsampling, latent_size, window, model, opt) in enumerate(layers):
             curr_length = curr_length // downsampling
             latent_length = curr_length + window // downsampling
-            #Add zero padding to_data
-            self.data = np.concatenate((np.zeros((window,),dtype=np.int8),data))
+            print(latent_length)
             if i == 0:
                 #Add zero padding to_data
                 self.data = np.cat((np.zeros((window,),dtype=np.int8),data))
@@ -150,34 +150,45 @@ class MultiTimescaleCLVM(object):
 
         return loss
     
-    def kl_loss(self, layer, index, extra,compute_grad=True):
-        top_latent, top_ds, top_window, top_model, _ = self.layers[layer+1]
+    def kl_loss(self, layer, index, extra, compute_grad=True):
+
+        #when using the top layer, compute kl w.r.t unit variance zero mean gaussian
         mid_latent, mid_ds, mid_window, _, _ = self.layers[layer]
         if compute_grad:
             mid_latent.grad = True
 
-        #Upsample and prepare top layer
-        mid_dist = mid_latent[index:index+extra+top_window+1]
-        mid_vals = gauss_samp(mid_dist)
-        mid_input = mid_vals[:-1]
+        if layer == len(self.layers)-1:
+            mid_dist = mid_latent[index:index+extra+1]
+            length = mid_dist[0].shape[0]
+            width  = mid_dist[0].shape[1]
+            prior = t.zeros(length,width).cuda(),t.zeros(length,width).cuda()
+            kl_div = gauss_kl_div(mid_dist,prior)
+        else:
+            top_latent, top_ds, top_window, top_model, _ = self.layers[layer+1]
 
-        length = mid_input.shape[0]
-        assert length == extra+top_window
-        width = top_latent.shape[1]
-        offset = (index-top_window) % top_ds
+            #Upsample and prepare top layer
+            mid_dist = mid_latent[index:index+extra+2*top_window]
+            mid_vals = gauss_samp(mid_dist)
+            mid_input = mid_vals[:-1]
 
-        top_dist = top_latent[get_top_slice(top_window, index, extra, top_ds)]
-        top_input = t.zeros(length,width).cuda()
-        top_input[(top_ds-offset)%top_ds::top_ds,:] = gauss_samp(top_dist)
+            length = mid_input.shape[0]
+            assert length == extra+2*top_window-1
+            width = top_latent.shape[1]
+            offset = (index-top_window) % top_ds
 
-        #Compute prior
+            top_dist = top_latent[get_top_slice(top_window, index, extra+top_window-1, top_ds)]
+            top_input = t.zeros(length,width).cuda()
+            top_input[(top_ds-offset)%top_ds::top_ds,:] = gauss_samp(top_dist)
 
-        prior_inputs = t.cat((top_input,mid_input),1).unsqueeze(0)
-        prior = top_model(prior_inputs)
+            #Compute prior
 
-        #Compute log_kl term
-        sub_mid_dist = mid_dist[0][index:index+extra+1],mid_dist[0][index:index+extra+1]
-        kl_div = gauss_kl_div(sub_mid_dist,prior)
+            prior_inputs = t.cat((top_input,mid_input),1).unsqueeze(0)
+            prior = top_model(prior_inputs)
+
+            #Compute log_kl term
+            sub_mid_dist = mid_dist[0][index:index+extra+top_window],mid_dist[0][index:index+extra+top_window]
+            kl_div = gauss_kl_div(sub_mid_dist,prior)
+
         loss = t.sum(kl_div)
 
         if compute_grad:
@@ -196,7 +207,7 @@ class MultiTimescaleCLVM(object):
         opt.step()
 
     def update_latent(self,layer,index, extra):
-        if layer < 0 or layer >= len(self.layers):
+        if layer < 0 or layer > len(self.layers):
             msg = "invalid layer, recived{} expected values between 0 and {}"
             raise Exception(msg.format(layer,len(self.layers)))
 
@@ -205,44 +216,57 @@ class MultiTimescaleCLVM(object):
             msg = "index must be greater than 0"
             raise Exception(msg)
 
-        if index+extra+1 >= mid_latent.shape[0]:
-            msg = "invalid index and extra parameters"
-            raise Exception(msg)
+        if layer < len(self.layers)-1:
+            top_window = self.layers[layer+1][2]
+            if index+extra+top_window+1 >= mid_latent.shape[0]:
+                msg = "invalid index and extra parameter too large"
+                raise Exception(msg)
+        else:
+            print(index+extra+1)
+            print(mid_latent.shape[0])
+            if index+extra+1 >= mid_latent.shape[0]:
+                msg = "invalid index and extra parameter too large"
+                raise Exception(msg)
 
         #if bottom layer
 
         #if top layer
+        mid_window = self.layers[layer][2]
+        bot_index = index*mid_ds
+        bot_extra = (extra+1)*mid_ds + mid_window + mid_ds - 1
         if layer == len(self.layers)-1:
-            bot_index = index*mid_ds
-            bot_extra = (extra+1)*mid_ds
-
+            loss, mid_dist_kl = self.kl_loss(layer, index, extra)
             loss, mid_dist_lp = self.lp_loss(layer, bot_index, bot_extra)
-            mean_grad = mid_dist_lp[0].grad.cpu().numpy()
-            log_var_grad = mid_dist_lp[1].grad.cpu().numpy()
+
+            lp_grad = mid_dist_lp[0].grad.cpu().numpy(),mid_dist_lp[1].grad.cpu().numpy()
+            kl_grad =  mid_dist_kl[0][mid_window:-mid_window+1].grad.cpu().numpy(), mid_dist_kl[1].grad[-lp_len:-top_window+1].cpu().numpy()
             min_len = mean_grad.shape[0]
+
+            mean_grad = kl_grad[0]+lp_grad[0]
+            log_var_grad = kl_grad[1]+lp_grad[1]
+
+            mid_latent[index:index+extra+1] = (mean_grad,log_var_grad)
         else:
             loss, mid_dist_kl =  self.kl_loss(layer, index, extra)
-
-            bot_index = index*mid_ds
-            bot_extra = (extra+1)*mid_ds
 
             loss, mid_dist_lp = self.lp_loss(layer, bot_index, bot_extra)
 
             kl_len = mid_dist_kl[0].shape[0]
             lp_len = mid_dist_lp[0].shape[0]
             if kl_len > lp_len:
-                kl_grad = mid_dist_kl[0].grad[-lp_len:].cpu().numpy(), mid_dist_kl[1].grad[-lp_len:].cpu().numpy()
-                lp_grad = mid_dist_lp[0].grad.cpu().numpy(), mid_dist_lp[1].grad.cpu().numpy()
+                kl_grad = mid_dist_kl[0].grad[-lp_len:-top_window+1].cpu().numpy(), mid_dist_kl[1].grad[-lp_len:-top_window+1].cpu().numpy()
+                lp_grad = mid_dist_lp[0].grad[:-top_window+1].cpu().numpy(), mid_dist_lp[1].grad[:-top_window+1].cpu().numpy()
                 min_len = lp_len
             else:
-                lp_grad = mid_dist_lp[0].grad[-kl_len:].cpu().numpy(), mid_dist_lp[1].grad[-kl_len:].cpu().numpy()
-                kl_grad = mid_dist_kl[0].grad.cpu().numpy(), mid_dist_kl[1].grad.cpu().numpy()
+                lp_grad = mid_dist_lp[0].grad[-kl_len:-top_window+1].cpu().numpy(), mid_dist_lp[1].grad[-kl_len:-top_window+1].cpu().numpy()
+                kl_grad = mid_dist_kl[0].grad[:-top_window+1].cpu().numpy(), mid_dist_kl[1].grad[:-top_window+1].cpu().numpy()
                 min_len = kl_len
 
+            print(kl_grad[0],lp_grad[0])
             mean_grad = kl_grad[0]+lp_grad[0]
             log_var_grad = kl_grad[1]+lp_grad[1]
 
-        mid_latent[index+extra+1-min_len:index+extra+1] = (mean_grad,log_var_grad)
+            mid_latent[index+extra+1-min_len+top_window-1:index+extra+1] = (mean_grad,log_var_grad)
 
 
 class TopMiniConv(nn.Module):
@@ -280,7 +304,7 @@ class BotMiniConv(nn.Module):
 
 
 def main():
-    data = np.array(text_to_indices("fdjkldfs.asasfj;ajafkdasfkljdfaskdafsfas;jasfd;ja;jasfd;"))
+    data = np.array(text_to_indices("ffdjkfdjkldfs.asasfj;ajafkdasfkljdfaskdafldfs.asasfj;ajafkdasfkljdfaskdaffdjkldfs.asasfj;ajafkdasfkljdfaskdaffdjkldfs.asasfj;ajafkdasfkljdfaskdafdjkldfs.asasfj;ajafkdasfkljdfaskdafsfas;jasfd;ja;jasfd;"))
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
     mb = BotMiniConv(1,256,256).cuda()
@@ -294,7 +318,7 @@ def main():
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
 
     clvm = MultiTimescaleCLVM(data, embedding, 1, layers)
-    clvm.update_latent(0,1,0)
+    clvm.update_latent(2,4,8)
     #clvm.update_layer(1,3,10)
 
 if __name__ == "__main__":
