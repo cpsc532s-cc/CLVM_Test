@@ -2,9 +2,9 @@ from math import ceil
 a = [i for i in range(50)]
 b = [i for i in range(50)]
 
-for i in range(8):
-    for j in range(8):
-        for k in range(8):
+for i in range(5,6):
+    for j in range(0,1):
+        for k in range(0,1):
             window = i
             #print(window)
             index = j
@@ -21,10 +21,12 @@ for i in range(8):
             c = ["x"]*window+["_"]*50
             #print(sub_a)
             c[(ds-offset)%ds+index:index+extra+window:ds] = "*"*len(c[(ds-offset)%ds+index:index+extra+window:ds])
+            print(c)
             d = c[index:index+extra+window]
             #i give up
             c_ = [x for x in c]
             c[index:index+extra+window] = "*"*len(c[index:index+extra+window])
+            print(c)
             try:
                 d[(ds-offset)%ds::ds] = sub_a
             except Exception:
