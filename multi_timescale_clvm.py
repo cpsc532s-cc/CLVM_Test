@@ -121,7 +121,6 @@ class MTCLVMManager(object):
         mtclvm = self.mtclvms[mtclvm_index]
         layer_probs = np.array([2**(-i) for i in range(len(self.layers))],dtype=np.float32)
         layer_index = np.random.choice(np.arange(len(self.layers)),p=layer_probs/np.sum(layer_probs))
-
         extra = self.update_sizes[layer_index]
         length =  mtclvm.layers[layer_index][1]
         index = np.random.random_integers(0, length-extra-1)
@@ -182,9 +181,9 @@ class MultiTimescaleCLVM(object):
 
         sl_top = get_top_slice(top_offset ,window, bot_index, bot_extra, ds)
         top_dist = top_latent[sl_top]
-        print(top_dist[0].shape)
         top_input = t.zeros(length,width).cuda()
         offset = (bot_index-window) % ds
+        #TODO elimante artifical variance reduction
         top_input[(ds-offset)%ds::ds,:] = gauss_samp((top_dist[0],top_dist[1]-4))
 
         #Prep input
@@ -207,13 +206,9 @@ class MultiTimescaleCLVM(object):
         if compute_grad:
             loss.backward()
             sl_top.start
-            a = window
-            print(a)
+            a = window // ds
             b = a+extra+1
-            print(b)
-            print(extra+1)
             top_grad = top_dist[0].grad[a:b],top_dist[1].grad[a:b]
-            print(top_grad[0].shape)
             top_latent.grad = False 
             return loss, top_grad
 
@@ -354,18 +349,20 @@ class BotMiniConv(nn.Module):
 
 
 def main():
-    data = np.array(text_to_indices("18501787865267716952377698607604837129164588734274390137438570245109617199589971983609906988907556575046253680228421466195655905777961449219611022508194193039358796606341136549054584764220810765696329568031236546736476748253341722371862956806941842624579522592797827605713515211614355488629591219459333575087580797555422588087985002034296322138357571638919133209077969973060273564"))
+    #text = "8501787865267716952377698607604837129164588734274390137438570245109617199589971983609906988907556575046253680228421466195655905777961449219611022508194193039358796606341136549054584764220810765696329568031236546736476748253341722371862956806941842624579522592797827605713515211614355488629591219459333575087580797555422588087985002034296322138357571638919133209077969973060273564"
+    #data = np.array(text_to_indices(text))
+    data = np.array(text_to_indices("850178"))
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
     mb = BotMiniConv(1,256,256).cuda()
 
     l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
     l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.0001))
-    l1 = (2, 1, 1, mb, optim.Adam(mb.parameters(),lr=0.0001))
+    l1 = (2, 1, 1, mb, optim.Adam(mb.parameters(),lr=0.01))
     
     layers = [l1]#,l2,l3]
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
-    update_sizes = [189]
+    update_sizes = [1]
 
 
 
