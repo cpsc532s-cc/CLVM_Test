@@ -1,12 +1,13 @@
 import numpy as np
 np.cat = np.concatenate
+np.random.seed(100)
 import torch as t 
 import torch.nn as nn
 import torch.nn.functional as f
 import torch.optim as opt
 from torch import FloatTensor as FT
 from variational_methods import *
-from decoders import *
+from decoders import * 
 from mnist_data import *
 from viz import *
 import time
@@ -68,17 +69,17 @@ class LatentVar(object):
         b2 = self.params["b2"]
         e = self.params["e"]
 
-        self.mean_m0[x] = self.mean_m0[x]*b1-(1-b1)*mean_grad
-        self.mean_m1[x] = self.mean_m1[x]*b2-(1-b2)*self.mean_m1[x]
+        self.mean_m0[x] = self.mean_m0[x]*b1+(1-b1)*mean_grad
+        self.mean_m1[x] = self.mean_m1[x]*b2+(1-b2)*(mean_grad**2)
         mean_m0 = self.mean_m0[x]/(1-b1)
         mean_m1 = self.mean_m1[x]/(1-b2)
-        self.mean[x] -= lr*mean_grad/(np.sqrt(mean_m1)+e)
+        self.mean[x] -= lr*mean_m0/(np.sqrt(mean_m1)+e)
 
-        self.log_var_m0[x] = self.log_var_m0[x]*b1-(1-b1)*log_var_grad
-        self.log_var_m1[x] = self.log_var_m1[x]*b2-(1-b2)*self.log_var_m1[x]
+        self.log_var_m0[x] = self.log_var_m0[x]*b1+(1-b1)*log_var_grad
+        self.log_var_m1[x] = self.log_var_m1[x]*b2+(1-b2)*(log_var_grad**2)
         log_var_m0 = self.log_var_m0[x]/(1-b1)
         log_var_m1 = self.log_var_m1[x]/(1-b2)
-        self.log_var[x] -= self.log_var[x]-lr*log_var_grad/(np.sqrt(log_var_m1)+e)
+        self.log_var[x] -= lr*log_var_m0/(np.sqrt(log_var_m1)+e)
 
 def get_top_slice(true_offset, window, index, extra, ds):
     imputed_offset = window // ds
@@ -96,53 +97,71 @@ def get_bot_slice(true_offset, window, index, extra):
     return slice(start,stop)
 
 class MTCLVMLayer(object):
+    #TODO: Finish implementing
     def __init__(self, latent_var, downsampling, max_window, model, opt):
         self.max_window = max_window
         self.downsampling = downsampling 
         self.latent_var = latent_var
 
 class MTCLVMManager(object):
-    def __init__(self, data_plural, embeding, layers):
+    def __init__(self, data_plural, embedding, layers, update_sizes):
         self.mtclvms = []
-        weights = []
-        for data in data_plural:
-            weight = data.shape[0] #weight updates based on 
-            self.mtclvms = MultiTimescaleCLVM(data, embedding)
+        self.layers = layers
+        self.update_sizes = update_sizes
+        weights = [] 
+        for i,data in enumerate(data_plural):
+            weights.append(data.shape[0]) #weight updates based on data size
+            self.mtclvms.append(MultiTimescaleCLVM(data, embedding, layers))
+        self.weights = np.array(weights,dtype=np.float32)
 
+    def update_model(self,model_update_prob = 0.05):
+        total_weight = np.sum(self.weights)
+        data_probs = self.weights / total_weight
+        mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
+        mtclvm = self.mtclvms[mtclvm_index]
+        layer_probs = np.array([2**(-i) for i in range(len(self.layers))],dtype=np.float32)
+        layer_index = np.random.choice(np.arange(len(self.layers)),p=layer_probs/np.sum(layer_probs))
 
-    def update_model():
-        
-
+        extra = self.update_sizes[layer_index]
+        length =  mtclvm.layers[layer_index][1]
+        index = np.random.random_integers(0, length-extra-1)
+        if np.random.rand() < model_update_prob:
+            mtclvm.update_layer(layer_index, index, extra)
+        else:
+            mtclvm.update_latent(layer_index, index, extra)
 
 class MultiTimescaleCLVM(object):
     def __init__(self, data, embedding, layers):
         self.data = data
         self.embedding = embedding
         self.layers = []
+        self.tl = 0
         curr_length = data.shape[0]
         #Generate latent variables
         for i, (downsampling, latent_size, window, model, opt) in enumerate(layers):
             curr_length = curr_length // downsampling
             if (i < len(layers)-1):
-                next_window = layers[i][2]
+                next_window = layers[i+1][2]
                 offset = max(window // downsampling, next_window)
-                padding = max(window // downsampling + downsampling - 1, next_window)
-                latent_length = offset + curr_length + window // downsampling
+                padding = max(window // downsampling, next_window)
+                latent_length = offset + curr_length + padding
             else:
                 offset = window // downsampling
-                padding = window // downsampling + downsampling - 1
+                padding = window // downsampling
                 latent_length = offset + curr_length + padding 
 
             if i == 0:
-                pad = np.zeros((window,),dtype=np.int8)
+                pad = np.zeros((window,),dtype=np.int32)
                 self.data = np.cat((pad, data, pad))
             latent_var = LatentVar((latent_length,latent_size),offset=window)
-            self.layers.append((offset, curr_length ,latent_var, downsampling, window, model, opt))
+            self.layers.append((offset, curr_length, latent_var, downsampling, window, model, opt))
 
     def lp_loss(self, layer, index, extra, compute_grad=True):
+        self.val_index_extra(layer, index, extra)
+
         top_offset, _, top_latent, ds, window, model, opt = self.layers[layer] 
         bot_index = index*ds
-        bot_extra = (extra+1)*ds + window + ds - 1
+        bot_extra = (extra+1)*ds-1
         if compute_grad:
             top_latent.grad = True
         if layer != 0:
@@ -163,9 +182,10 @@ class MultiTimescaleCLVM(object):
 
         sl_top = get_top_slice(top_offset ,window, bot_index, bot_extra, ds)
         top_dist = top_latent[sl_top]
+        print(top_dist[0].shape)
         top_input = t.zeros(length,width).cuda()
         offset = (bot_index-window) % ds
-        top_input[(ds-offset)%ds::ds,:] = gauss_samp(top_dist)
+        top_input[(ds-offset)%ds::ds,:] = gauss_samp((top_dist[0],top_dist[1]-4))
 
         #Prep input
         inputs = t.cat((top_input,bot_input),1).unsqueeze(0)
@@ -186,15 +206,21 @@ class MultiTimescaleCLVM(object):
 
         if compute_grad:
             loss.backward()
-            a = index-sl_top.start
+            sl_top.start
+            a = window
+            print(a)
             b = a+extra+1
+            print(b)
+            print(extra+1)
             top_grad = top_dist[0].grad[a:b],top_dist[1].grad[a:b]
+            print(top_grad[0].shape)
             top_latent.grad = False 
             return loss, top_grad
 
         return loss
     
     def kl_loss(self, layer, index, extra, compute_grad=True):
+        self.val_index_extra(layer, index, extra)
 
         #when using the top layer, compute kl w.r.t unit variance zero mean gaussian
         mid_offset, _, mid_latent, mid_ds, mid_window, _, _ = self.layers[layer]
@@ -250,7 +276,8 @@ class MultiTimescaleCLVM(object):
             return loss, mid_grad
         else:
             return loss
-    def val_index_extra(layer, index, extra):
+
+    def val_index_extra(self, layer, index, extra):
         if layer < 0 or layer >= len(self.layers):
             msg = "invalid layer, recived{} expected values between 0 and {}"
             raise Exception(msg.format(layer,len(self.layers)-1))
@@ -259,28 +286,37 @@ class MultiTimescaleCLVM(object):
         if index < 0:
             msg = "invalid index, recived {} index must be greater than 0"
             raise Exception(msg.format(index))
-        if index + extra + 1 < length:
+        if index + extra + 1 > length:
             msg = "invalid index and extra parameters, recived {} index + extra must be <= {}"
-            raise Exception(msg.format(index+extra,length))
+            raise Exception(msg.format(index+extra,length - 1))
 
     def update_layer(self, layer, index, extra): 
+        #print("LY",layer,index,extra)
         opt = self.layers[layer][6]
         opt.zero_grad()
         loss = self.lp_loss(layer, index, extra, compute_grad=False)
         loss.backward()
+        val = loss.detach().cpu().numpy()
+        print(self.tl,"\t   \t",val)
+        self.tl = self.tl*0.99 + 0.01*val
         opt.step()
 
-    def update_latent(self, layer,index, extra):
+    def update_latent(self, layer, index, extra):
+        #print("LT",layer,index,extra)
         offset, _, mid_latent, mid_ds, mid_window, mid_model, _ = self.layers[layer]
 
         loss, mid_grad_kl = self.kl_loss(layer, index, extra)
         loss, mid_grad_lp = self.lp_loss(layer, index, extra)
-        lp_grad = mid_grad_kl[0].cpu().numpy(), mid_grad_kl[1].cpu().numpy()
-        kl_grad =  mid_grad_lp[0].cpu().numpy(), mid_grad_lp[1].cpu().numpy()
+        kl_grad = mid_grad_kl[0].cpu().numpy(), mid_grad_kl[1].cpu().numpy()
+        lp_grad =  mid_grad_lp[0].cpu().numpy(), mid_grad_lp[1].cpu().numpy()
 
-        mean_grad = kl_grad[0]+lp_grad[0]
-        log_var_grad = kl_grad[1]+lp_grad[1]
-        mid_latent[index:index+extra+1] = (mean_grad,log_var_grad)
+        #mean_grad = kl_grad[0]+lp_grad[0]
+        #log_var_grad = kl_grad[1]+lp_grad[1]
+        #mean_grad = kl_grad[0]
+        #log_var_grad = kl_grad[1]
+        mean_grad = lp_grad[0]
+        log_var_grad = lp_grad[1]
+        mid_latent[offset+index:offset+index+extra+1] = (mean_grad,log_var_grad)
 
 
 class TopMiniConv(nn.Module):
@@ -302,11 +338,11 @@ class TopMiniConv(nn.Module):
 
 class BotMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch,bot_out):
-        int_ch = 15
+        int_ch = 2
         super(BotMiniConv, self).__init__()
-        self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,5,dilation=2,)
-        self.l2 = nn.Conv1d(int_ch,int_ch,2,dilation=1,)
-        self.dist = nn.Conv1d(int_ch,bot_out,5,dilation=1,)
+        self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,1,dilation=1,)
+        self.l2 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.dist = nn.Conv1d(int_ch,bot_out,1,dilation=1,)
 
     def forward(self,x):
         x = x.permute(0,2,1)
@@ -318,27 +354,25 @@ class BotMiniConv(nn.Module):
 
 
 def main():
-    data = np.array(text_to_indices("ffdjkfdjkldfs.asasfj;ajafkdasfkljdfaskdafldfs.asasfj;ajafkdasfkljdfaskdaffdjkldfs..asasfj;ajafkdasfkljdfaskdaffdjkldfs.asasfj;ajafkdasfkljdfaskdafdjkldfs.asasfj;ajafkdasfkljdfaskdafsfas;jasfdasasfj;ajafkdasfkljdfaskdaffdjkldfs.asasfj;ajafkdasfkljdfaskdafdjkldfs.asasfj;ajafkdasfkljdfaskdafsfas;jasfd;ja;jasfd;"))
+    data = np.array(text_to_indices("18501787865267716952377698607604837129164588734274390137438570245109617199589971983609906988907556575046253680228421466195655905777961449219611022508194193039358796606341136549054584764220810765696329568031236546736476748253341722371862956806941842624579522592797827605713515211614355488629591219459333575087580797555422588087985002034296322138357571638919133209077969973060273564"))
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
     mb = BotMiniConv(1,256,256).cuda()
 
-    l4 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
     l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
     l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.0001))
-    l1 = (2, 1, 14, mb, optim.Adam(mb.parameters(),lr=0.0001))
+    l1 = (2, 1, 1, mb, optim.Adam(mb.parameters(),lr=0.0001))
     
-    layers = [l1,l2,l3,l4]
-
+    layers = [l1]#,l2,l3]
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
+    update_sizes = [189]
 
-    clvm = MultiTimescaleCLVM(data, embedding, 1, layers)
-    for i in range(4):
-        for j in range(2):
-            for k in range(2):
-                print(i,j,k)
-                clvm.update_latent(i,j,k)
-                clvm.update_layer(i,j,k)
+
+
+    #clvm = MultiTimescaleCLVM(data, embedding, layers)
+    mtclvmm = MTCLVMManager([data], embedding, layers, update_sizes)
+    for i in range(500000):
+        mtclvmm.update_model()
 
 if __name__ == "__main__":
     main()
