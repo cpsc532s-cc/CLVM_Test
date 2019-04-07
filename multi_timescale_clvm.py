@@ -183,13 +183,13 @@ class MultiTimescaleCLVM(object):
         top_dist = top_latent[sl_top]
         top_input = t.zeros(length,width).cuda()
         offset = (bot_index-window) % ds
-        #TODO elimante artifical variance reduction
-        top_input[(ds-offset)%ds::ds,:] = gauss_samp((top_dist[0],top_dist[1]-4))
+        top_input[(ds-offset)%ds::ds,:] = gauss_samp((top_dist[0],top_dist[1]))
 
         #Prep input
         inputs = t.cat((top_input,bot_input),1).unsqueeze(0)
 
         prediction = model(inputs)
+        #print(index,prediction[0,:2,:7],prediction[0,:2,:7])
         assert prediction[0].shape[1] == bot_extra+window+1
         #Compute loss
         if layer != 0:
@@ -197,9 +197,10 @@ class MultiTimescaleCLVM(object):
             log_p = gauss_log_p(prediction,targets)
             loss = -t.sum(log_p)
         else:
-            a = window+index
+            a = window+bot_index
             b = a+bot_extra+window+1
             targets = LT(self.data[a:b]).cuda().unsqueeze(0)
+            #print(targets[0,:7],targets[0,-7:])
             log_p = -f.cross_entropy(prediction,targets,reduction="none")
             loss = -t.sum(log_p)
 
@@ -292,7 +293,7 @@ class MultiTimescaleCLVM(object):
         loss = self.lp_loss(layer, index, extra, compute_grad=False)
         loss.backward()
         val = loss.detach().cpu().numpy()
-        print(self.tl,"\t   \t",val)
+        print(self.tl,"\t   \t",val,"\t   \t", index)
         self.tl = self.tl*0.99 + 0.01*val
         opt.step()
 
@@ -305,12 +306,12 @@ class MultiTimescaleCLVM(object):
         kl_grad = mid_grad_kl[0].cpu().numpy(), mid_grad_kl[1].cpu().numpy()
         lp_grad =  mid_grad_lp[0].cpu().numpy(), mid_grad_lp[1].cpu().numpy()
 
-        #mean_grad = kl_grad[0]+lp_grad[0]
-        #log_var_grad = kl_grad[1]+lp_grad[1]
+        mean_grad = kl_grad[0]+lp_grad[0]
+        log_var_grad = kl_grad[1]+lp_grad[1]
         #mean_grad = kl_grad[0]
         #log_var_grad = kl_grad[1]
-        mean_grad = lp_grad[0]
-        log_var_grad = lp_grad[1]
+        #mean_grad = lp_grad[0]
+        #log_var_grad = lp_grad[1]
         mid_latent[offset+index:offset+index+extra+1] = (mean_grad,log_var_grad)
 
 
@@ -349,20 +350,21 @@ class BotMiniConv(nn.Module):
 
 
 def main():
-    #text = "8501787865267716952377698607604837129164588734274390137438570245109617199589971983609906988907556575046253680228421466195655905777961449219611022508194193039358796606341136549054584764220810765696329568031236546736476748253341722371862956806941842624579522592797827605713515211614355488629591219459333575087580797555422588087985002034296322138357571638919133209077969973060273564"
-    #data = np.array(text_to_indices(text))
-    data = np.array(text_to_indices("850178"))
+    text = "8501787865267716952377698607604837129164588734274390137438570245109617199589971983609906988907556575046253680228421466195655905777961449219611022508194193039358796606341136549054584764220810765696329568031236546736476748253341722371862956806941842624579522592797827605713515211614355488629591219459333575087580797555422588087985002034296322138357571638919133209077969973060273564"
+    data = np.array(text_to_indices(text))
+    #data = np.array(text_to_indices("850178"))
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
-    mb = BotMiniConv(1,256,256).cuda()
+    mb = BotMiniConv(1,1,256).cuda()
 
     l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
     l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.0001))
     l1 = (2, 1, 1, mb, optim.Adam(mb.parameters(),lr=0.01))
     
     layers = [l1]#,l2,l3]
-    embedding = lambda x: FT(np.eye(256)[x]).cuda()
-    update_sizes = [1]
+    #embedding = lambda x: FT(np.eye(256)[x]).cuda()
+    embedding = lambda x: FT(np.arange(256)[x,np.newaxis]).cuda()
+    update_sizes = [187]
 
 
 
