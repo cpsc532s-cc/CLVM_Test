@@ -1,32 +1,40 @@
 #G_STORE_DEVICE = torch.device('cpu')
 G_COMP_DEVICE = torch.device('cpu')
 
-class DiagGaussArrayLatentStore:
-    class DiagGaussArrayLatentVars():
-        def __init__(self, mean, log_var, requires_grad):
-            if type(mean) is FT:
-                self.mean = mean
-            else:
-                self.mean = FT(mean, device = device)
 
-            if type(log_var) is FT:
-                self.log_var = log_var
-            else:
-                self.log_var = FT(log_var[indices], device = device)
+class DiagGaussArrayLatentVars():
+    def __init__(self, mean, log_var, device, requires_grad):
+        if type(mean) is FT:
+            self.mean = mean
+        else:
+            self.mean = FT(mean, device = device)
 
-            self._requires_grad = requires_grad
-            self.mean.requires_grad = self._requires_grad
-            self.log_var.requires_grad = self._requires_grad
+        if type(log_var) is FT:
+            self.log_var = log_var
+        else:
+            self.log_var = FT(log_var, device = device)
 
-        def kl_divergence(self, other_latent):
-            if not type(other_latent) is DiagGaussArrayLatentBatch:
-                raise NotImplementedError()
-            else:
-                #TODO
+        self._requires_grad = requires_grad
+        self.mean.requires_grad = self._requires_grad
+        self.log_var.requires_grad = self._requires_grad
 
-        def sample(self, var_reduction):
-            gauss_samp
+    def kl_divergence(self, other_latent):
+        if not type(other_latent) is DiagGaussArrayLatentBatch:
+            raise NotImplementedError()
+        else:
+            #TODO
+
+    def sample(self, var_reduction):
+        gauss_samp
+
+    @staticmethod
+    def get_normal(dim, device, requires_grad):
+        return DiagGaussArrayLatentVars(
+                mean = t.zeros(dim, device = device), 
+                log_var = t.zeros(dim, device = device), 
+                requires_grad)
             
+class DiagGaussArrayLatentStore:
 
     def __init__(self, dim, num):
         # Init to normal
@@ -79,16 +87,13 @@ class MiddleEdge:
         self.model = model
         return self.model.get_required_input_dim(output_dim)
 
-    def reconstruct_loss(input_latent_batch, output_latent_batch):
+    def lp_loss(input_latent_batch, output_latent_batch):
         # Corresponding batches of input and output latent variables
-        
         # Sample z_in from q_in
         q_in_samp = input_latent_batch.sample()
 
         # Compute p(z_out|z_in)
-        q_in_samp = input_latent_batch.sample()
-        p_out_mean, p_out_log_var = self.model(q_in_samp)
-        p_out = DiagGaussArrayLatentVars(p_out_mean, p_out_log_var)
+        p_out = output_posterior(q_in_samp)
 
         # Compute KL(p_out||q_out)
         q_out = output_latent_batch
@@ -96,14 +101,33 @@ class MiddleEdge:
         loss = -kl_q_p 
 
         return loss
-        
+
+    def output_posterior(input_sample):
+        # Compute p(z_out|z_in)
+        p_out_mean, p_out_log_var = self.model(input_sample)
+        p_out = DiagGaussArrayLatentVars(p_out_mean, p_out_log_var)
+
+        return p_out
         
 class BottomEdge:
     # Edge between bottom latent and gt data
     def __init__(self, output_dim):
 
+    def reconstruct_loss(input_latent_batch, output_data_batch):
+        # Corresponding batches of input and output latent variables
+        # Sample z_in from q_in
+        q_in_samp = input_latent_batch.sample()
 
-    def reconstruct_loss(input_latent, output_data):
+        # Compute p(z_out|z_in)
+        p_out = output_posterior(q_in_samp)
+
+        # Compute KL(p_out||q_out)
+        q_out = output_latent_batch
+        kl_q_p = p_out.kl_divergence(q_out)
+        loss = -kl_q_p 
+
+        return loss
+
 
 class CLVM_Chain:
     # Construct the chain starting from the bottom
@@ -114,7 +138,11 @@ class CLVM_Chain:
 
     def update_edge():
 
-    def prior_loss(latent):
-        # Computes KL divergence
+        prev_latent
 
+    def prior_loss(latent, prior):
+        # Computes KL divergence
+        q_z = latent
+        p_z = prior
+        return -q_z.kl_divergence(p_z)
 
