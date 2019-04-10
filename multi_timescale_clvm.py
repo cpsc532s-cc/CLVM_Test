@@ -23,9 +23,10 @@ def text_to_indices(text):
     return indices
         
 
-def indices_to_text(text):
+def indices_to_text(indicies):
+    #TODO: Make more efficient
     text_array = []
-    for i in text:
+    for i in indicies:
         text_array += chr(i)
     text = "".join(text_array)
     return text
@@ -37,7 +38,7 @@ def slice_tuple(x,sl):
     return tuple(out)
 
 class LatentVar(object):
-    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.1, "b1":0.9, "b2":0.999, "e":1e-8}):
+    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.025, "b1":0.9, "b2":0.999, "e":1e-8}):
         self.optimizer = optimizer
         self.params = params
         self.offset = offset
@@ -108,19 +109,23 @@ class MTCLVMManager(object):
         self.mtclvms = []
         self.layers = layers
         self.update_sizes = update_sizes
+        self.embedding = embedding
         weights = [] 
         for i,data in enumerate(data_plural):
             weights.append(data.shape[0]) #weight updates based on data size
             self.mtclvms.append(MultiTimescaleCLVM(data, embedding, layers))
         self.weights = np.array(weights,dtype=np.float32)
 
-    def update_model(self,model_update_prob = 0.05):
+    def update_model(self,model_update_prob = 0.05,layer_index=None):
         total_weight = np.sum(self.weights)
         data_probs = self.weights / total_weight
         mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
         mtclvm = self.mtclvms[mtclvm_index]
-        layer_probs = np.array([2**(-i) for i in range(len(self.layers))],dtype=np.float32)
-        layer_index = np.random.choice(np.arange(len(self.layers)),p=layer_probs/np.sum(layer_probs))
+        if layer_index == None:
+            layer_probs = np.array([2**(-i) for i in range(len(self.layers))],dtype=np.float32)
+            layer_index = np.random.choice(np.arange(len(self.layers)),p=layer_probs/np.sum(layer_probs))
+        else:
+            layer_index = layer_index
         extra = self.update_sizes[layer_index]
         length =  mtclvm.layers[layer_index][1]
         index = np.random.random_integers(0, length-extra-1)
@@ -128,6 +133,72 @@ class MTCLVMManager(object):
             mtclvm.update_layer(layer_index, index, extra)
         else:
             mtclvm.update_latent(layer_index, index, extra)
+
+    def generate(self, top_len):
+        #initialize top layer
+        top_model = self.layers[-1][3]
+        top_window = self.layers[-1][2]
+        top_size = self.layers[-1][1]
+        top_ds = self.layers[-1][0]
+        top_offset = top_window//top_ds
+        top_latent_dist = t.zeros((top_len + top_offset,top_size)),t.zeros((top_len + top_offset,top_size))
+        top_latent = gauss_samp(top_latent_dist)
+
+        #generate_intermediate layers
+        for i in list(range(len(self.layers)-1))[::-1]:
+            bot_model = self.layers[i][3]
+            bot_window = self.layers[i][2]
+            bot_size = self.layers[i][1]
+            bot_ds = self.layers[i][0]
+
+            bot_offset = max(top_window, bot_window//bot_ds)
+            bot_len = top_len * top_ds 
+            top_input = t.zeros((top_window+bot_len,top_size)).cuda()
+            top_input[top_window % top_ds::top_ds,:] = top_latent[-(top_window // top_ds+top_len):]
+            bot_latent = t.zeros((bot_len + bot_offset,top_size)).cuda()
+            bot_latent_offset_dist = t.zeros((bot_offset,top_size)).cuda(),t.zeros((bot_offset,top_size)).cuda()
+
+            bot_latent[:bot_offset,:] = gauss_samp(bot_latent_offset_dist)
+
+            bot_delta = bot_offset - top_window
+            for j in range(bot_len):
+                top_input_subset = top_input[j:j+top_window]
+                bot_input_subset = bot_latent[bot_delta+j:bot_delta+j+top_window]
+
+                model_input = t.cat((top_input_subset,bot_input_subset), 1).unsqueeze(0)
+                model_output = top_model(model_input)
+                bot_latent[j+bot_offset,:] = gauss_samp(model_output)
+
+            top_len = bot_len
+            top_model = bot_model
+            top_window = bot_window
+            top_offset = bot_offset
+            top_ds = bot_ds
+            top_latent = bot_latent
+            top_size = bot_size
+
+        #generate intermediate layers
+        samp_len = top_len*top_ds
+        padded_samp_len = (samp_len + top_window, top_size)
+        padded_samp = t.zeros((samp_len + top_window,),dtype=t.int32)
+
+        #TODO: Verify
+        top_input = t.zeros(top_window+samp_len,top_size).cuda()
+        top_input[top_window % top_ds::top_ds] = top_latent[-(top_window // top_ds+top_len):]
+
+        for j in range(samp_len):
+            top_input_subset = top_input[j:j+top_window]
+            bot_input_subset = self.embedding(padded_samp[j:top_window+j])
+            model_input = t.cat((top_input_subset,bot_input_subset), 1).unsqueeze(0)
+            model_output = top_model(model_input)
+            sample = t.multinomial(t.squeeze(f.softmax(model_output,1)),1)
+            padded_samp[top_window+j] = sample
+
+        output = padded_samp[top_window:]
+        return output
+
+
+
 
 class MultiTimescaleCLVM(object):
     def __init__(self, data, embedding, layers):
@@ -293,8 +364,9 @@ class MultiTimescaleCLVM(object):
         loss = self.lp_loss(layer, index, extra, compute_grad=False)
         loss.backward()
         val = loss.detach().cpu().numpy()
-        print(self.tl,"\t   \t",val,"\t   \t", index)
-        self.tl = self.tl*0.99 + 0.01*val
+        if layer == 0:
+            print(self.tl,"\t   \t",val,"\t   \t", index)
+            self.tl = self.tl*0.99 + 0.01*val
         opt.step()
 
     def update_latent(self, layer, index, extra):
@@ -334,10 +406,10 @@ class TopMiniConv(nn.Module):
 
 class BotMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch,bot_out):
-        int_ch = 2
+        int_ch = 20
         super(BotMiniConv, self).__init__()
-        self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,1,dilation=1,)
-        self.l2 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,3,dilation=1,)
+        self.l2 = nn.Conv1d(int_ch,int_ch,3,dilation=1,)
         self.dist = nn.Conv1d(int_ch,bot_out,1,dilation=1,)
 
     def forward(self,x):
@@ -350,28 +422,46 @@ class BotMiniConv(nn.Module):
 
 
 def main():
-    text = "8501787865267716952377698607604837129164588734274390137438570245109617199589971983609906988907556575046253680228421466195655905777961449219611022508194193039358796606341136549054584764220810765696329568031236546736476748253341722371862956806941842624579522592797827605713515211614355488629591219459333575087580797555422588087985002034296322138357571638919133209077969973060273564"
+    pre_text = "629256083683113848749365415435049699408567335747273975038007434615314954522374078191171949141418830801581429434637224555511728401165397825357655622115124820378852506676560199186630"
+    text = ""
+    for x in pre_text:
+        text = "".join([text]+[x]*20)
+    text = str(text)
+    print(text)
     data = np.array(text_to_indices(text))
     #data = np.array(text_to_indices("850178"))
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
-    mb = BotMiniConv(1,1,256).cuda()
+    mb = BotMiniConv(1,256,256).cuda()
 
-    l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
-    l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.0001))
-    l1 = (2, 1, 1, mb, optim.Adam(mb.parameters(),lr=0.01))
+    l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.001))
+    l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.01))
+    l1 = (2, 1, 5, mb, optim.Adam(mb.parameters(),lr=0.01))
     
-    layers = [l1]#,l2,l3]
-    #embedding = lambda x: FT(np.eye(256)[x]).cuda()
-    embedding = lambda x: FT(np.arange(256)[x,np.newaxis]).cuda()
-    update_sizes = [187]
+    layers = [l1,l2]#,l3]
+    embedding = lambda x: FT(np.eye(256)[x]).cuda()
+    #embedding = lambda x: FT(np.arange(256)[x,np.newaxis]).cuda()
+    update_sizes = [500,250]
 
 
 
     #clvm = MultiTimescaleCLVM(data, embedding, layers)
     mtclvmm = MTCLVMManager([data], embedding, layers, update_sizes)
-    for i in range(500000):
-        mtclvmm.update_model()
+
+    for i in range(40000):
+        mtclvmm.update_model(model_update_prob=0.5)
+    #print("##############################################")
+    #for i in range(20000):
+        #mtclvmm.update_model(layer_index = 1)
+    #print("##############################################")
+    #for i in range(10000):
+        #mtclvmm.update_model(layer_index = 0)
+    print("A")
+    for i in range(20):
+        sample = indices_to_text(mtclvmm.generate(200).detach().cpu().numpy())
+        print(sample)
+        print("######################################################")
+    print("B")
 
 if __name__ == "__main__":
     main()
