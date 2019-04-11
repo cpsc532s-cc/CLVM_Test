@@ -3,7 +3,7 @@ import torch as t
 import torch.nn as nn
 import torch.nn.functional as f
 import torch.optim as opt
-from torch import FloatTensor as FT
+from torch import FloatTensor
 from variational_methods import *
 from decoders import *
 from mnist_data import *
@@ -14,9 +14,11 @@ import matplotlib.pyplot as plt
 from models import MLP
 
 
-#G_STORE_DEVICE = torch.device('cpu')
-G_COMP_DEVICE = torch.device('cpu')
+G_STORE_DEVICE = torch.device('cpu')
+G_COMP_DEVICE = torch.device('cuda:0')
 
+def FT(data, device = G_STORE_DEVICE, requires_grad = False):
+    return t.tensor(data, device = device, requires_grad = requires_grad)
 
 class DiagGaussArrayLatentVars():
     def __init__(self, mean, log_var, requires_grad = None, device = G_COMP_DEVICE):
@@ -132,7 +134,7 @@ class Edge:
         # Check if this is valid
         model = model_class(model_configs, output_fdim, is_bot)
         assert(model.is_valid_output_dim(output_fdim))
-        self.model = model
+        self.model = model.to(G_COMP_DEVICE)
         self._optim = optim.Adam(self.model.parameters(),lr=lr)
 
     def get_required_input_dim(self, output_fdim):
@@ -294,6 +296,9 @@ class MNISTData():
     def sample_indices(self):
         x = np.random.randint(0,self.n//self.bs)
         return slice(x*self.bs,(x+1)*self.bs)
+    
+    def slice(self, indices):
+        return self._data[indices].reshape((-1,28,28))
 
 
 def main():
@@ -307,13 +312,26 @@ def main():
     clvm.stack_latent(MLP, {"in_size": 8, "h_size": 16}, opt_class, opt_params, 0.001)
     clvm.print_rep()
 
-    for i in range(50):
+    ds = DisplayStream()
+    for i in range(5000):
         indices = data.sample_indices()
         clvm.update(indices)
+        if i%100 == 0:
+            recon = clvm.reconstruct(range(5) 2)
+            recon_means = recon.mean.detach().cpu().numpy().reshape((-1,28,28))
+            recon_tup = ()
+            for recon_mean in recon_means:
+                recon_tup += (recon_mean,)
+            recon_img = np.hstack(recon_tup)
+            print(recon_img.shape)
 
-    recon = clvm.reconstruct([1], 0)
-    plt.imshow(recon.mean.detach().cpu().numpy().reshape((28,28)))
-    plt.show()
+            trues = data.slice(range(5))
+            true_tup = ()
+            for true in trues:
+                true_tup += (true,)
+            true_img = np.hstack(true_tup)
+            print(true_img.shape)
+            ds.show_img(np.vstack((recon_img, true_img)))
 
 if __name__ == "__main__":
     main()
