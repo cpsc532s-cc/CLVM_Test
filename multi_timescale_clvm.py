@@ -7,12 +7,14 @@ import torch.nn.functional as f
 import torch.optim as opt
 from torch import FloatTensor as FT
 from variational_methods import *
+from gutenberg_data import *
 from decoders import * 
 from mnist_data import *
 from viz import *
 import time
 import matplotlib.pyplot as plt
 import torch as t
+import pickle
 from torch import FloatTensor as FT 
 from torch import LongTensor as LT 
 
@@ -22,6 +24,18 @@ def text_to_indices(text):
         indices.append(ord(i))
     return indices
         
+def shitty_text_to_indices(text):
+    indices = []
+    for i in text:
+        x = ord(i)
+        if (x == 8216 or x == 8217):
+                x = 39
+        if (x == 8220 or x == 8221):
+                x = 34
+        if (x > 255):
+            continue
+        indices.append(x)
+    return indices
 
 def indices_to_text(indicies):
     #TODO: Make more efficient
@@ -116,7 +130,7 @@ class MTCLVMManager(object):
             self.mtclvms.append(MultiTimescaleCLVM(data, embedding, layers))
         self.weights = np.array(weights,dtype=np.float32)
 
-    def update_model(self,model_update_prob = 0.05,layer_index=None):
+    def update_model(self,model_update_prob = 0.05,layer_index=None, update_layer=None):
         total_weight = np.sum(self.weights)
         data_probs = self.weights / total_weight
         mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
@@ -129,10 +143,16 @@ class MTCLVMManager(object):
         extra = self.update_sizes[layer_index]
         length =  mtclvm.layers[layer_index][1]
         index = np.random.random_integers(0, length-extra-1)
-        if np.random.rand() < model_update_prob:
-            mtclvm.update_layer(layer_index, index, extra)
+        if update_layer == True:
+            loss = mtclvm.update_layer(layer_index, index, extra)
+        elif update_layer == False:
+            loss = mtclvm.update_latent(layer_index, index, extra)
+        elif np.random.rand() < model_update_prob:
+            loss = mtclvm.update_layer(layer_index, index, extra)
         else:
-            mtclvm.update_latent(layer_index, index, extra)
+            loss = mtclvm.update_latent(layer_index, index, extra)
+
+        return loss
 
     def generate(self, top_len):
         #initialize top layer
@@ -179,7 +199,6 @@ class MTCLVMManager(object):
 
         #generate intermediate layers
         samp_len = top_len*top_ds
-        padded_samp_len = (samp_len + top_window, top_size)
         padded_samp = t.zeros((samp_len + top_window,),dtype=t.int32)
 
         #TODO: Verify
@@ -205,7 +224,6 @@ class MultiTimescaleCLVM(object):
         self.data = data
         self.embedding = embedding
         self.layers = []
-        self.tl = 0
         curr_length = data.shape[0]
         #Generate latent variables
         for i, (downsampling, latent_size, window, model, opt) in enumerate(layers):
@@ -261,6 +279,7 @@ class MultiTimescaleCLVM(object):
 
         prediction = model(inputs)
         #print(index,prediction[0,:2,:7],prediction[0,:2,:7])
+        #print(prediction[0].shape[1],bot_extra+window+1)
         assert prediction[0].shape[1] == bot_extra+window+1
         #Compute loss
         if layer != 0:
@@ -271,8 +290,8 @@ class MultiTimescaleCLVM(object):
             a = window+bot_index
             b = a+bot_extra+window+1
             targets = LT(self.data[a:b]).cuda().unsqueeze(0)
-            #print(targets[0,:7],targets[0,-7:])
             log_p = -f.cross_entropy(prediction,targets,reduction="none")
+
             loss = -t.sum(log_p)
 
         if compute_grad:
@@ -363,18 +382,17 @@ class MultiTimescaleCLVM(object):
         opt.zero_grad()
         loss = self.lp_loss(layer, index, extra, compute_grad=False)
         loss.backward()
-        val = loss.detach().cpu().numpy()
-        if layer == 0:
-            print(self.tl,"\t   \t",val,"\t   \t", index)
-            self.tl = self.tl*0.99 + 0.01*val
+        loss = loss.detach().cpu().numpy()
         opt.step()
+        return loss
+        
 
     def update_latent(self, layer, index, extra):
         #print("LT",layer,index,extra)
         offset, _, mid_latent, mid_ds, mid_window, mid_model, _ = self.layers[layer]
 
-        loss, mid_grad_kl = self.kl_loss(layer, index, extra)
-        loss, mid_grad_lp = self.lp_loss(layer, index, extra)
+        kl_loss, mid_grad_kl = self.kl_loss(layer, index, extra)
+        lp_loss, mid_grad_lp = self.lp_loss(layer, index, extra)
         kl_grad = mid_grad_kl[0].cpu().numpy(), mid_grad_kl[1].cpu().numpy()
         lp_grad =  mid_grad_lp[0].cpu().numpy(), mid_grad_lp[1].cpu().numpy()
 
@@ -385,11 +403,12 @@ class MultiTimescaleCLVM(object):
         #mean_grad = lp_grad[0]
         #log_var_grad = lp_grad[1]
         mid_latent[offset+index:offset+index+extra+1] = (mean_grad,log_var_grad)
+        return kl_loss.detach().cpu().numpy(), lp_loss.detach().cpu().numpy()
 
 
 class TopMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch):
-        int_ch = 15
+        int_ch = 512
         super(TopMiniConv, self).__init__()
         self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,5,dilation=2,)
         self.l2 = nn.Conv1d(int_ch,int_ch,2,dilation=1,)
@@ -406,50 +425,69 @@ class TopMiniConv(nn.Module):
 
 class BotMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch,bot_out):
-        int_ch = 20
+        int_ch = 1024 
         super(BotMiniConv, self).__init__()
-        self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,3,dilation=1,)
-        self.l2 = nn.Conv1d(int_ch,int_ch,3,dilation=1,)
-        self.dist = nn.Conv1d(int_ch,bot_out,1,dilation=1,)
+        self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,4,dilation=1,)
+        self.l2 = nn.Conv1d(int_ch,int_ch,4,dilation=1,)
+        self.l3 = nn.Conv1d(int_ch,int_ch,4,dilation=1,)
+        self.dist = nn.Conv1d(int_ch,bot_out,4,dilation=1,)
 
     def forward(self,x):
         x = x.permute(0,2,1)
         h1 = f.relu(self.l1(x))
         h2 = f.relu(self.l2(h1))
-        dist = self.dist(h2)
+        h3 = f.relu(self.l3(h2))
+        dist = self.dist(h3)
         #dist = dist.permute(0,2,1)
         return dist
 
-
 def main():
     pre_text = "629256083683113848749365415435049699408567335747273975038007434615314954522374078191171949141418830801581429434637224555511728401165397825357655622115124820378852506676560199186630"
-    text = ""
-    for x in pre_text:
-        text = "".join([text]+[x]*20)
-    text = str(text)
-    print(text)
-    data = np.array(text_to_indices(text))
-    #data = np.array(text_to_indices("850178"))
+    #text = ""
+    #for x in pre_text:
+    #    text = "".join([text]+[x]*20)
+    #text = str(text)
+    #print(text)
+    #text = get_moby_dick()
+
+    #print(sorted(list(set(text))))
+    #print(text_to_indices(sorted(list(set(text)))))
+    books = get_texts(100)
+    data = []
+    for text in books:
+        print(len(text))
+        if len(shitty_text_to_indices(text)) > 10000:
+            data.append(np.array(shitty_text_to_indices(text)))
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
     mb = BotMiniConv(1,256,256).cuda()
 
-    l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.001))
+    l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.015))
     l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.01))
-    l1 = (2, 1, 5, mb, optim.Adam(mb.parameters(),lr=0.01))
+    l1 = (2, 1, 13, mb, optim.Adam(mb.parameters(),lr=0.00005))
     
-    layers = [l1,l2]#,l3]
+    layers = [l1]#,l2,l3]
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
     #embedding = lambda x: FT(np.arange(256)[x,np.newaxis]).cuda()
-    update_sizes = [500,250]
+    update_sizes = [1024,1000,1000]
 
 
 
     #clvm = MultiTimescaleCLVM(data, embedding, layers)
-    mtclvmm = MTCLVMManager([data], embedding, layers, update_sizes)
+    mtclvmm = MTCLVMManager(data, embedding, layers, update_sizes)
 
-    for i in range(40000):
-        mtclvmm.update_model(model_update_prob=0.5)
+    losses = []
+    for i in range(50000):
+        lp_loss_0 = mtclvmm.update_model(layer_index=0,update_layer=True)
+        #for j in range(3):
+            #kl_loss_0,lp_loss_0 = mtclvmm.update_model(layer_index=0,update_layer=False)
+            #pass
+        #print(kl_loss_0,"\t   \t",lp_loss_0)
+        print(i,"\t  \t",lp_loss_0)
+        if i % 20 == 0  and i > 1000:
+            losses.append(lp_loss_0)
+
+
     #print("##############################################")
     #for i in range(20000):
         #mtclvmm.update_model(layer_index = 1)
@@ -458,10 +496,12 @@ def main():
         #mtclvmm.update_model(layer_index = 0)
     print("A")
     for i in range(20):
-        sample = indices_to_text(mtclvmm.generate(200).detach().cpu().numpy())
+        sample = indices_to_text(mtclvmm.generate(500).detach().cpu().numpy())
         print(sample)
         print("######################################################")
     print("B")
+    plt.plot(losses)
+    plt.show()
 
 if __name__ == "__main__":
     main()
