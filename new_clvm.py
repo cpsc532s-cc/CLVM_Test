@@ -4,18 +4,17 @@ import torch.nn as nn
 import torch.nn.functional as f
 import torch.optim as opt
 from torch import FloatTensor
-from variational_methods import *
-from decoders import *
-from mnist_data import *
+
 from viz import *
+from variational_methods import *
+from mnist_data import *
 import time
-import matplotlib.pyplot as plt
 
-from models import MLP
+import models as m
 
 
-G_STORE_DEVICE = torch.device('cpu')
-G_COMP_DEVICE = torch.device('cuda:0')
+G_STORE_DEVICE = t.device('cpu')
+G_COMP_DEVICE = t.device('cuda:0')
 
 def FT(data, device = G_STORE_DEVICE, requires_grad = False):
     return t.tensor(data, device = device, requires_grad = requires_grad)
@@ -156,7 +155,8 @@ class Edge:
 
 class CLVM_Stack:
     # Construct the stack starting from the bottom
-    def __init__(self, data):
+    def __init__(self, data, use_kl=True):
+        self.use_kl = use_kl
         self._edges = []
         self._latents = []
         # Dependencies have structure  {obj: [in, out]}
@@ -203,18 +203,22 @@ class CLVM_Stack:
         #ingoing_edge, outgoing_edge = self._latent_dep[latent]
         latent_batch = latent.load_batch(indices, requires_grad=True)
         kl_loss = self.kl_loss(latent, latent_batch)
-        kl_loss.backward()
+        if self.use_kl:
+            kl_loss.backward()
         lp_loss = self.lp_loss(latent, latent_batch)
         lp_loss.backward()
         latent.optimizer().step()
+        return np.asscalar(lp_loss.detach().cpu().numpy()), \
+                 np.asscalar(kl_loss.detach().cpu().numpy())
 
     def update_edge(self, edge, indices):
         #print(indices)
         input_latent = self._edge_dep[edge][0]
         edge.zero_grad()
-        loss = self.lp_loss(input_latent, input_latent.load_batch(indices, requires_grad=False))
-        loss.backward()
+        lp_loss = self.lp_loss(input_latent, input_latent.load_batch(indices, requires_grad=False))
+        lp_loss.backward()
         edge.step()
+        return np.asscalar(lp_loss.detach().cpu().numpy())
 
     def kl_loss(self, latent, latent_batch):
         indices = latent.cur_indices
@@ -224,11 +228,12 @@ class CLVM_Stack:
         if ingoing_edge is None:
             # For top latent, kl with normal
             prior = DiagGaussArrayLatentVars.get_normal((latent_batch.n,)+(latent_batch.fdims))
+            #print(t.sum(latent_batch.kl_divergence(prior)).detach().cpu().numpy())
         else:
             # For other dists kl based on previous latent
             prev_q = self._edge_dep[ingoing_edge][0].load_batch(indices)
             prior = ingoing_edge.output_likelihood(prev_q.sample())
-        return t.sum(latent_batch.kl_divergence(prior))
+        return t.mean(latent_batch.kl_divergence(prior))
 
     def lp_loss(self, input_latent, input_latent_batch):
         indices = input_latent.cur_indices
@@ -246,43 +251,81 @@ class CLVM_Stack:
         if output is self._data:
             # Compute log likelihood of the data
             output_data_batch = self._data.load_batch(indices)
-            loss =  -t.sum(p_out.log_likelihood(output_data_batch))
-            print(loss.detach().cpu().numpy())
+            loss =  -t.mean(p_out.log_likelihood(output_data_batch))
             return loss
         else:
             # Compute kl wrt output
             output_latent_batch = output.load_batch(indices)
-            return t.sum(p_out.kl_divergence(output_latent_batch))
+            return t.mean(p_out.kl_divergence(output_latent_batch))
 
     def print_rep(self):
         for latent in self._latents:
             print(latent.fdims)
 
-    def update(self, indices):
-        for edge in self._edges:
-            self.update_edge(edge, indices)
+    def update(self, indices, display=False):
+        np.set_printoptions(precision=4)
+        if display:
+            print("Latent:")
+        for _ in range(2):
+            losses = self.update_latents(indices)
+            if display:
+                print(np.asarray(losses))
+        losses = self.update_edges(indices)
+        if display:
+            print("Edge:", np.asarray(losses))
+            print("-"*40)
 
+    def update_edges(self, indices):
+        lp_losses = []
+        for edge in self._edges:
+            lp_losses.append(self.update_edge(edge, indices))
+        return lp_losses
+
+    def update_latents(self, indices):
+        lp_losses = []
+        kl_losses = []
         for latent in self._latents:
-            self.update_latent(latent, indices)
+            lp_loss, kl_loss = self.update_latent(latent, indices)
+            lp_losses.append(lp_loss)
+            kl_losses.append(kl_loss)
+        return lp_losses, kl_losses
 
     def reconstruct(self, indices, latent_idx):
         latent = self._latents[latent_idx]
         latent_batch = latent.load_batch(indices)
+        # Get sample
+        latent_samps = latent_batch.sample()
+        # Decode sample
+        return self.decode_from_sample(latent_samps, latent_idx)
+
+    def decode_from_sample(self, latent_samps, latent_idx):
+        latent = self._latents[latent_idx]
         while True:
+            # Get outgoing edge
             edge = self._latent_dep[latent][1]
-            latent_samp = latent_batch.sample()
-            latent_batch = edge.output_likelihood(latent_samp)
+            # Compute new latent batch with old sample
+            latent_batch = edge.output_likelihood(latent_samps)
             latent = self._edge_dep[edge][1]
             if latent is self._data:
                 break
+            # Sample new latent batch
+            latent_samps = latent_batch.sample()
 
         return latent_batch
+
+    def sample(self, num):
+        # Sample prior for the top layer 
+        top_fdims = self._latents[-1].fdims
+        prior = DiagGaussArrayLatentVars.get_normal((num,)+(top_fdims))
+        return self.decode_from_sample(prior.sample(), -1)
 
 
 class MNISTData():
     def __init__(self, bs):
         self.bs = bs
-        data = np.array(load_mnist().view(-1,784), dtype=np.float32)[::200]
+        data = load_mnist()
+        data = np.array(data.view((data.shape[0],)+(1,)+data.shape[1:]), dtype=np.float32)[::5]
+        print(data.shape)
         self.fdims = data.shape[1:]
         self._data = (data-np.mean(data))/np.std(data)
         self.n = self._data.shape[0]
@@ -294,44 +337,56 @@ class MNISTData():
         return batch
 
     def sample_indices(self):
-        x = np.random.randint(0,self.n//self.bs)
-        return slice(x*self.bs,(x+1)*self.bs)
+        #x = np.random.randint(0,self.n//self.bs)
+        #return slice(x*self.bs,(x+1)*self.bs)
+        return np.random.randint(0, self.n, size=self.bs)
     
     def slice(self, indices):
-        return self._data[indices].reshape((-1,28,28))
+        return self._data[indices]#.reshape((-1,28,28))
 
 
 def main():
     # MNIST Test
-    data = MNISTData(32)
-    opt_params={"lr":0.1, "b1":0.9, "b2":0.999, "e":1e-8}
+    data = MNISTData(128)
+    opt_params={"lr":0.05, "b1":0.9, "b2":0.999, "e":1e-8}
     opt_class=AdamLatentOpt
     clvm = CLVM_Stack(data)
-    clvm.stack_latent(MLP, {"in_size": 128, "h_size": 256}, opt_class, opt_params, 0.001)
-    clvm.stack_latent(MLP, {"in_size": 32, "h_size": 64}, opt_class, opt_params, 0.001)
-    clvm.stack_latent(MLP, {"in_size": 8, "h_size": 16}, opt_class, opt_params, 0.001)
+    clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 4, "h_chan": 16}, opt_class, opt_params, 0.003)
+    clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":2}, opt_class, opt_params, 0.001)
+    clvm.stack_latent(m.MLP, {"in_size": 32, "h_size": 64, "n_int":1}, opt_class, opt_params, 0.001)
+    #clvm.stack_latent(m.Deconv2d, {"stride": 256, "h_size": 256, "n_int":3}, opt_class, opt_params, 0.003)
+    #clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":1}, opt_class, opt_params, 0.001)
     clvm.print_rep()
 
     ds = DisplayStream()
-    for i in range(5000):
+    for i in range(50000):
         indices = data.sample_indices()
-        clvm.update(indices)
-        if i%100 == 0:
-            recon = clvm.reconstruct(range(5) 2)
-            recon_means = recon.mean.detach().cpu().numpy().reshape((-1,28,28))
+        if i%50 == 0:
+            print(i)
+            clvm.update(indices, display=True)
+            recon = clvm.reconstruct(range(5), -1)
+            recon_means = recon.sample().detach().cpu().numpy().reshape((-1,28,28)).squeeze()
             recon_tup = ()
             for recon_mean in recon_means:
                 recon_tup += (recon_mean,)
             recon_img = np.hstack(recon_tup)
-            print(recon_img.shape)
 
-            trues = data.slice(range(5))
+            trues = data.slice(range(5)).squeeze()
             true_tup = ()
             for true in trues:
                 true_tup += (true,)
             true_img = np.hstack(true_tup)
-            print(true_img.shape)
-            ds.show_img(np.vstack((recon_img, true_img)))
+
+            sample = clvm.sample(5)
+            sample_means = sample.sample().detach().cpu().numpy().reshape((-1,28,28)).squeeze()
+            sample_tup = ()
+            for sample_mean in sample_means:
+                sample_tup += (sample_mean,)
+            sample_img = np.hstack(sample_tup)
+
+            ds.show_img(np.vstack((recon_img, true_img, sample_img)))
+        else:
+            clvm.update(indices)
 
 if __name__ == "__main__":
     main()
