@@ -266,7 +266,7 @@ class CLVM_Stack:
         np.set_printoptions(precision=4)
         if display:
             print("Latent:")
-        for _ in range(2):
+        for _ in range(5):
             losses = self.update_latents(indices)
             if display:
                 print(np.asarray(losses))

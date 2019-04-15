@@ -12,6 +12,9 @@ from scipy import misc
 import matplotlib.pyplot as plt
 
 from PIL import Image
+from tensorboardX import SummaryWriter
+
+writer = SummaryWriter()
 
 G_STORE_DEVICE = t.device('cpu')
 G_COMP_DEVICE = t.device('cuda:0')
@@ -76,16 +79,16 @@ class LSUNData():
 
 def main():
     data = LSUNData(64)
-    opt_params={"lr":0.03, "b1":0.9, "b2":0.999, "e":1e-8}
+    opt_params={"lr":0.02, "b1":0.9, "b2":0.999, "e":1e-8}
     opt_class=AdamLatentOpt
     clvm = CLVM_Stack(data, use_kl = False)
-    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 32, "n_h": 2}, opt_class, opt_params, 0.002)
+    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 16, "n_h": 2}, opt_class, opt_params, 0.002)
     clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 32}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 32, "n_h": 2}, opt_class, opt_params, 0.002)
+    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 16, "n_h": 2}, opt_class, opt_params, 0.002)
     clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 32}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 32, "n_h": 2}, opt_class, opt_params, 0.002)
+    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 16, "n_h": 2}, opt_class, opt_params, 0.002)
     clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 32}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":2}, opt_class, opt_params, 0.01)
+    clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":2}, opt_class, opt_params, 0.002)
     #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 1, "i_pad":0, "i_chan": 8, "h_chan": 16}, opt_class, opt_params, 0.01)
     #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 16}, opt_class, opt_params, 0.01)
     #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 16, "h_chan": 32}, opt_class, opt_params, 0.01)
@@ -95,7 +98,7 @@ def main():
     clvm.print_rep()
 
     ds = DisplayStream()
-    for i in range(5000):
+    for i in range(50000):
         indices = data.sample_indices()
         if i%20 == 0:
             clvm.update(indices, display = True)

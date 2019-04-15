@@ -56,11 +56,11 @@ class ResNetBlock(nn.Module):
         self.n_h = model_configs["n_h"]
 
         # Padding required to be shape preserving
-        pad = self.k//2+1
+        pad = (self.k-1)//2
 
         self.start_block = nn.Conv2d(self.i_chan,self.h_chan,self.k,padding=pad)
         self.layers = nn.ModuleList([])
-        for _ in range(n_h):
+        for _ in range(self.n_h):
             self.layers.append(nn.Conv2d(self.h_chan,self.h_chan,self.k,padding=pad))
 
         # Output heads
@@ -69,9 +69,9 @@ class ResNetBlock(nn.Module):
 
     def forward(self, x):
         h = f.leaky_relu(self.start_block(x))
-        h2 = None
+        h2 = h 
         for lay in self.layers:
-            h2 = f.leaky_relu(h2 = lay(h2))
+            h2 = f.leaky_relu(lay(h2))
         h = h+h2
         mean = self.mean(h)
         logvar = log_rect(self.log_var(h))
@@ -84,7 +84,9 @@ class ResNetBlock(nn.Module):
 
     def get_required_input_dim(self, output_dim):
         # Resnet block is shape preserving
-        return output_dim
+        # Extended to allow converting channel umber though
+        print(output_dim)
+        return (self.i_chan,) + output_dim[1:]
 
 
 class Deconv2d(nn.Module):
