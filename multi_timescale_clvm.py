@@ -1,10 +1,12 @@
 import numpy as np
+import math
 np.cat = np.concatenate
 np.random.seed(100)
 import torch as t 
 import torch.nn as nn
 import torch.nn.functional as f
 import torch.optim as opt
+import os.path
 from torch import FloatTensor as FT
 from variational_methods import *
 from gutenberg_data import *
@@ -17,6 +19,12 @@ import torch as t
 import pickle
 from torch import FloatTensor as FT 
 from torch import LongTensor as LT 
+
+from scipy.io import wavfile
+import numpy as np
+from scipy.signal import butter, lfilter
+
+MODEL_PATH = "model"
 
 def text_to_indices(text):
     indices = []
@@ -52,7 +60,7 @@ def slice_tuple(x,sl):
     return tuple(out)
 
 class LatentVar(object):
-    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.025, "b1":0.9, "b2":0.999, "e":1e-8}):
+    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.03, "b1":0.9, "b2":0.999, "e":1e-8}):
         self.optimizer = optimizer
         self.params = params
         self.offset = offset
@@ -65,6 +73,9 @@ class LatentVar(object):
 
             self.mean_m1 = np.zeros(dim,np.float32)
             self.log_var_m1 = np.zeros(dim,np.float32)
+            
+            #TODO: COme up with a less degenerate way of doing this
+            self.parameters = ["mean", "log_var", "mean_m0", "log_var_m0", "mean_m1", "log_var_m1"]
 
         self.grad = False 
         self.shape = self.mean.shape
@@ -95,6 +106,22 @@ class LatentVar(object):
         log_var_m0 = self.log_var_m0[x]/(1-b1)
         log_var_m1 = self.log_var_m1[x]/(1-b2)
         self.log_var[x] -= lr*log_var_m0/(np.sqrt(log_var_m1)+e)
+
+    def save(self,name,directory):
+        for i in range(len(parameters)):
+            f = name + str(i) + ".npy"
+            path = os.path.join(directory,f)
+            arr = self.__dict__[self.parameters[i]]
+            np.save(os.path.join(directory,path),arr)
+
+
+    def load(self,name,directory):
+        for i in range(len(parameters)):
+            f = name + str(i) + ".npy"
+            path = os.path.join(directory,f)
+            val = np.load(os.path.join(directory,path))
+            self.__dict__[self.parameters[i]] = val
+
 
 def get_top_slice(true_offset, window, index, extra, ds):
     imputed_offset = window // ds
@@ -130,7 +157,7 @@ class MTCLVMManager(object):
             self.mtclvms.append(MultiTimescaleCLVM(data, embedding, layers))
         self.weights = np.array(weights,dtype=np.float32)
 
-    def update_model(self,model_update_prob = 0.05,layer_index=None, update_layer=None):
+    def update_model(self,model_update_prob = 0.05,layer_index=None, update_layer=None, kl_lambda=1):
         total_weight = np.sum(self.weights)
         data_probs = self.weights / total_weight
         mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
@@ -146,11 +173,11 @@ class MTCLVMManager(object):
         if update_layer == True:
             loss = mtclvm.update_layer(layer_index, index, extra)
         elif update_layer == False:
-            loss = mtclvm.update_latent(layer_index, index, extra)
+            loss = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
         elif np.random.rand() < model_update_prob:
             loss = mtclvm.update_layer(layer_index, index, extra)
         else:
-            loss = mtclvm.update_latent(layer_index, index, extra)
+            loss = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
 
         return loss
 
@@ -284,8 +311,12 @@ class MultiTimescaleCLVM(object):
         #Compute loss
         if layer != 0:
             targets = bot_vals[window:]
-            log_p = gauss_log_p(prediction,targets)
-            loss = -t.sum(log_p)
+            #log_p = gauss_log_p(prediction,targets)
+            #loss = -t.sum(log_p)
+            
+            targets = bot_dist[0][window:],bot_dist[1][window:]
+            exp_neg_log_p = gauss_kl_div(targets,prediction)
+            loss = t.sum(exp_neg_log_p)
         else:
             a = window+bot_index
             b = a+bot_extra+window+1
@@ -347,8 +378,9 @@ class MultiTimescaleCLVM(object):
             prior = top_model(prior_inputs)
 
             #Compute log_kl term
-            sub_mid_dist = mid_dist[0][top_window:],mid_dist[0][top_window:]
+            sub_mid_dist = mid_dist[0][top_window:],mid_dist[1][top_window:]
             kl_div = gauss_kl_div(sub_mid_dist,prior)
+            #print(t.std(sub_mid_dist[0])/t.exp(t.mean(sub_mid_dist[1])/2))
 
             loss = t.sum(kl_div)
 
@@ -377,7 +409,6 @@ class MultiTimescaleCLVM(object):
             raise Exception(msg.format(index+extra,length - 1))
 
     def update_layer(self, layer, index, extra): 
-        #print("LY",layer,index,extra)
         opt = self.layers[layer][6]
         opt.zero_grad()
         loss = self.lp_loss(layer, index, extra, compute_grad=False)
@@ -387,7 +418,7 @@ class MultiTimescaleCLVM(object):
         return loss
         
 
-    def update_latent(self, layer, index, extra):
+    def update_latent(self, layer, index, extra, kl_lambda=1):
         #print("LT",layer,index,extra)
         offset, _, mid_latent, mid_ds, mid_window, mid_model, _ = self.layers[layer]
 
@@ -396,8 +427,8 @@ class MultiTimescaleCLVM(object):
         kl_grad = mid_grad_kl[0].cpu().numpy(), mid_grad_kl[1].cpu().numpy()
         lp_grad =  mid_grad_lp[0].cpu().numpy(), mid_grad_lp[1].cpu().numpy()
 
-        mean_grad = kl_grad[0]+lp_grad[0]
-        log_var_grad = kl_grad[1]+lp_grad[1]
+        mean_grad = kl_grad[0]*kl_lambda+lp_grad[0]
+        log_var_grad = kl_grad[1]*kl_lambda+lp_grad[1]
         #mean_grad = kl_grad[0]
         #log_var_grad = kl_grad[1]
         #mean_grad = lp_grad[0]
@@ -408,7 +439,7 @@ class MultiTimescaleCLVM(object):
 
 class TopMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch):
-        int_ch = 512
+        int_ch = 256
         super(TopMiniConv, self).__init__()
         self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,5,dilation=2,)
         self.l2 = nn.Conv1d(int_ch,int_ch,2,dilation=1,)
@@ -425,11 +456,14 @@ class TopMiniConv(nn.Module):
 
 class BotMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch,bot_out):
-        int_ch = 1024 
+        int_ch = 512 
         super(BotMiniConv, self).__init__()
         self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,4,dilation=1,)
         self.l2 = nn.Conv1d(int_ch,int_ch,4,dilation=1,)
         self.l3 = nn.Conv1d(int_ch,int_ch,4,dilation=1,)
+        self.l4 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.l5 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.l6 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
         self.dist = nn.Conv1d(int_ch,bot_out,4,dilation=1,)
 
     def forward(self,x):
@@ -437,9 +471,25 @@ class BotMiniConv(nn.Module):
         h1 = f.relu(self.l1(x))
         h2 = f.relu(self.l2(h1))
         h3 = f.relu(self.l3(h2))
-        dist = self.dist(h3)
+        h4 = f.relu(self.l4(h3))+h3
+        h5 = f.relu(self.l5(h4))+h4
+        h6 = f.relu(self.l6(h5))+h5
+        dist = self.dist(h6)
         #dist = dist.permute(0,2,1)
         return dist
+
+#https://stackoverflow.com/questions/48393608/pytorch-network-parameter-calculation
+def count_parameters(model):
+    total_param = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            num_param = np.prod(param.size())
+            if param.dim() > 1:
+                print(name, ':', 'x'.join(str(x) for x in list(param.size())), '=', num_param)
+            else:
+                print(name, ':', num_param)
+            total_param += num_param
+    return total_param
 
 def main():
     pre_text = "629256083683113848749365415435049699408567335747273975038007434615314954522374078191171949141418830801581429434637224555511728401165397825357655622115124820378852506676560199186630"
@@ -452,55 +502,81 @@ def main():
 
     #print(sorted(list(set(text))))
     #print(text_to_indices(sorted(list(set(text)))))
-    books = get_texts(100)
+    books = get_texts(10)
     data = []
+    total_characters = 0
     for text in books:
-        print(len(text))
         if len(shitty_text_to_indices(text)) > 10000:
             data.append(np.array(shitty_text_to_indices(text)))
+            total_characters += len(text)
+            print(len(text))
+    print("Total Characters:", total_characters)
     mt = TopMiniConv(1,1).cuda()
     mm = TopMiniConv(1,1).cuda()
     mb = BotMiniConv(1,256,256).cuda()
 
+    print("MM Parameters:", count_parameters(mm))
+
+    print("MB Parameters:", count_parameters(mb))
+
     l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.015))
-    l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.01))
-    l1 = (2, 1, 13, mb, optim.Adam(mb.parameters(),lr=0.00005))
+    l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.001))
+
+    l1 = (2, 1, 13, mb, optim.Adam(mb.parameters(),lr=0.001))
     
-    layers = [l1]#,l2,l3]
+    layers = [l1,l2]#,l3]
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
     #embedding = lambda x: FT(np.arange(256)[x,np.newaxis]).cuda()
-    update_sizes = [1024,1000,1000]
+    update_sizes = [1024,1024,1000]
 
 
 
     #clvm = MultiTimescaleCLVM(data, embedding, layers)
     mtclvmm = MTCLVMManager(data, embedding, layers, update_sizes)
 
-    losses = []
-    for i in range(50000):
+    losses0 = []
+    losses1 = []
+    for i in range(40000):
         lp_loss_0 = mtclvmm.update_model(layer_index=0,update_layer=True)
-        #for j in range(3):
-            #kl_loss_0,lp_loss_0 = mtclvmm.update_model(layer_index=0,update_layer=False)
-            #pass
-        #print(kl_loss_0,"\t   \t",lp_loss_0)
-        print(i,"\t  \t",lp_loss_0)
-        if i % 20 == 0  and i > 1000:
-            losses.append(lp_loss_0)
+        lp_loss_1 = mtclvmm.update_model(layer_index=1,update_layer=True)
+        if i < 20000:
+            kl_lambda = 0#math.cos(math.pi*i/15000)**2
+        else:
+            kl_lambda = 1
+        for j in range(6):
+            kl_loss_0,lp_loss_0 = mtclvmm.update_model(
+                    layer_index=0,update_layer=False,kl_lambda=kl_lambda)
+        print(i,"\t  \t", lp_loss_0, "\t  \t",  kl_loss_0, "\t  \t", lp_loss_1)
+        #print(i,"\t  \t", lp_loss_0, "\t  \t",opt.param_groups[0]["lr"])
+        if i % 1 == 0:
+            losses0.append(kl_loss_0+lp_loss_0)
+            losses1.append(lp_loss_1)
+    np.save("loss0.npy", np.array(losses0,dtype=np.float32))
+    np.save("loss1.npy", np.array(losses1,dtype=np.float32))
 
 
     #print("##############################################")
     #for i in range(20000):
         #mtclvmm.update_model(layer_index = 1)
-    #print("##############################################")
-    #for i in range(10000):
-        #mtclvmm.update_model(layer_index = 0)
+
     print("A")
-    for i in range(20):
+    for i in range(5):
         sample = indices_to_text(mtclvmm.generate(500).detach().cpu().numpy())
         print(sample)
         print("######################################################")
     print("B")
-    plt.plot(losses)
+
+
+    b, a = butter(3, 0.006, btype='low') 
+    filtered_losses0 = lfilter(b, a, losses0)
+    filtered_losses1 = lfilter(b, a, losses1)
+    print(filtered_losses0)
+
+    plt.plot(losses0[3000:])
+    plt.plot(filtered_losses0[3000:])
+    plt.show()
+    plt.plot(losses1[3000:])
+    plt.plot(filtered_losses1[3000:])
     plt.show()
 
 if __name__ == "__main__":
