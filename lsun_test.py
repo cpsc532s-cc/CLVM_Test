@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from tensorboardX import SummaryWriter
 
-writer = SummaryWriter()
 
 G_STORE_DEVICE = t.device('cpu')
 G_COMP_DEVICE = t.device('cuda:0')
@@ -98,10 +97,13 @@ def main():
     clvm.print_rep()
 
     ds = DisplayStream()
+    writer = SummaryWriter()
     for i in range(50000):
         indices = data.sample_indices()
         if i%20 == 0:
-            clvm.update(indices, display = True)
+            lp_losses_l, kl_losses_l, lp_losses_e = clvm.update(indices, display=True, return_loss=True)
+            write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e)
+
             recon = clvm.reconstruct(range(5), -1)
             recon_means = recon.sample().detach().cpu().numpy().reshape((-1,3,64,64)).squeeze()
             recon_img = data.collate_images(recon_means)

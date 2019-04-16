@@ -262,18 +262,25 @@ class CLVM_Stack:
         for latent in self._latents:
             print(latent.fdims)
 
-    def update(self, indices, display=False):
+    def update(self, indices, display=False, return_loss=False):
         np.set_printoptions(precision=4)
         if display:
             print("Latent:")
+        lp_losses_l = []
+        kl_losses_l = []
         for _ in range(5):
-            losses = self.update_latents(indices)
+            lp_loss_l, kl_loss_l = self.update_latents(indices)
+            lp_losses_l.append(lp_loss_l)
+            kl_losses_l.append(kl_loss_l)
             if display:
                 print(np.asarray(losses))
-        losses = self.update_edges(indices)
+        lp_losses_e = self.update_edges(indices)
         if display:
             print("Edge:", np.asarray(losses))
             print("-"*40)
+        if return_loss:
+            # Just return everything
+            return lp_losses_l, kl_losses_l, lp_losses_e
 
     def update_edges(self, indices):
         lp_losses = []
@@ -314,7 +321,7 @@ class CLVM_Stack:
         return latent_batch
 
     def sample(self, num):
-        # Sample prior for the top layer 
+        # Sample prior for the top layer
         top_fdims = self._latents[-1].fdims
         prior = DiagGaussArrayLatentVars.get_normal((num,)+(top_fdims))
         return self.decode_from_sample(prior.sample(), -1)
@@ -340,10 +347,22 @@ class MNISTData():
         #x = np.random.randint(0,self.n//self.bs)
         #return slice(x*self.bs,(x+1)*self.bs)
         return np.random.randint(0, self.n, size=self.bs)
-    
+
     def slice(self, indices):
         return self._data[indices]#.reshape((-1,28,28))
 
+
+def write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e):
+    #for i,  in enumerate(zip(lp_losses_l, kl_losses_l)):
+    #    (lp_l, kl_l)
+    # Just write the last and the first losses
+    for i in range(len(lp_losses_l[0]))
+        writer.add_scalars('loss/lp_loss{}'.format(i),
+                {'start': lp_losses_l[0][i],
+                    'end': lp_losses_l[-1][i]}, iter_n)
+        writer.add_scalars('loss/kl_loss{}'.format(i),
+                {'start': kl_losses_l[0][i],
+                    'end': kl_losses_l[-1][i]}, iter_n)
 
 def main():
     # MNIST Test
@@ -363,7 +382,8 @@ def main():
         indices = data.sample_indices()
         if i%50 == 0:
             print(i)
-            clvm.update(indices, display=True)
+            lp_losses_l, kl_losses_l, lp_losses_e = clvm.update(indices, display=True, return_loss=True)
+
             recon = clvm.reconstruct(range(5), -1)
             recon_means = recon.sample().detach().cpu().numpy().reshape((-1,28,28)).squeeze()
             recon_tup = ()
