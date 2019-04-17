@@ -56,8 +56,9 @@ def run_clvm():
     opt_class=AdamLatentOpt
     clvm = CLVM_Stack(data)
     #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 4, "h_chan": 16}, opt_class, opt_params, 0.003)
-    #clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":2}, opt_class, opt_params, 0.001)
-    clvm.stack_latent(m.MLP, {"in_size": 2, "h_size": 2, "n_int":1}, opt_class, opt_params, 0.001)
+    clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 512, "n_int":0}, opt_class, opt_params, 0.001)
+    clvm.stack_latent(m.MLP, {"in_size": 32, "h_size": 128, "n_int":0}, opt_class, opt_params, 0.001)
+    #clvm.stack_latent(m.MLP, {"in_size": 2, "h_size": 2, "n_int":1}, opt_class, opt_params, 0.001)
     #clvm.stack_latent(m.Deconv2d, {"stride": 256, "h_size": 256, "n_int":3}, opt_class, opt_params, 0.003)
     #clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":1}, opt_class, opt_params, 0.001)
     clvm.print_rep()
