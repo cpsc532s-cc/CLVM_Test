@@ -5,16 +5,14 @@ import torch.nn.functional as f
 import torch.optim as opt
 from torch import FloatTensor
 
-from viz import *
 from variational_methods import *
-from mnist_data import *
 import time
 
 import models as m
 
-
 G_STORE_DEVICE = t.device('cpu')
-G_COMP_DEVICE = t.device('cuda:0')
+#G_COMP_DEVICE = t.device('cuda:0')
+G_COMP_DEVICE = t.device('cpu')
 
 def FT(data, device = G_STORE_DEVICE, requires_grad = False):
     return t.tensor(data, device = device, requires_grad = requires_grad)
@@ -273,10 +271,10 @@ class CLVM_Stack:
             lp_losses_l.append(lp_loss_l)
             kl_losses_l.append(kl_loss_l)
             if display:
-                print(np.asarray(losses))
+                print(np.asarray([lp_loss_l, kl_loss_l]))
         lp_losses_e = self.update_edges(indices)
         if display:
-            print("Edge:", np.asarray(losses))
+            print("Edge:", np.asarray(lp_losses_e))
             print("-"*40)
         if return_loss:
             # Just return everything
@@ -326,44 +324,7 @@ class CLVM_Stack:
         prior = DiagGaussArrayLatentVars.get_normal((num,)+(top_fdims))
         return self.decode_from_sample(prior.sample(), -1)
 
-
-class MNISTData():
-    def __init__(self, bs):
-        self.bs = bs
-        data = load_mnist()
-        data = np.array(data.view((data.shape[0],)+(1,)+data.shape[1:]), dtype=np.float32)[::5]
-        print(data.shape)
-        self.fdims = data.shape[1:]
-        self._data = (data-np.mean(data))/np.std(data)
-        self.n = self._data.shape[0]
-
-    def load_batch(self, indices, requires_grad = False, device = G_COMP_DEVICE):
-        #print(self._data[indices].dtype, self._data[indices].shape)
-        batch = FT(self._data[indices], device = device)
-        batch.requires_grad = requires_grad
-        return batch
-
-    def sample_indices(self):
-        #x = np.random.randint(0,self.n//self.bs)
-        #return slice(x*self.bs,(x+1)*self.bs)
-        return np.random.randint(0, self.n, size=self.bs)
-
-    def slice(self, indices):
-        return self._data[indices]#.reshape((-1,28,28))
-
-
-def write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e):
-    #for i,  in enumerate(zip(lp_losses_l, kl_losses_l)):
-    #    (lp_l, kl_l)
-    # Just write the last and the first losses
-    for i in range(len(lp_losses_l[0]))
-        writer.add_scalars('loss/lp_loss{}'.format(i),
-                {'start': lp_losses_l[0][i],
-                    'end': lp_losses_l[-1][i]}, iter_n)
-        writer.add_scalars('loss/kl_loss{}'.format(i),
-                {'start': kl_losses_l[0][i],
-                    'end': kl_losses_l[-1][i]}, iter_n)
-
+"""
 def main():
     # MNIST Test
     data = MNISTData(128)
@@ -411,3 +372,4 @@ def main():
 if __name__ == "__main__":
     main()
 
+"""
