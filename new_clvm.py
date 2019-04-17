@@ -231,7 +231,7 @@ class CLVM_Stack:
             # For other dists kl based on previous latent
             prev_q = self._edge_dep[ingoing_edge][0].load_batch(indices)
             prior = ingoing_edge.output_likelihood(prev_q.sample())
-        return t.mean(latent_batch.kl_divergence(prior))
+        return t.sum(latent_batch.kl_divergence(prior))/len(indices)
 
     def lp_loss(self, input_latent, input_latent_batch):
         indices = input_latent.cur_indices
@@ -249,16 +249,59 @@ class CLVM_Stack:
         if output is self._data:
             # Compute log likelihood of the data
             output_data_batch = self._data.load_batch(indices)
-            loss =  -t.mean(p_out.log_likelihood(output_data_batch))
+            loss =  -t.sum(p_out.log_likelihood(output_data_batch))/len(indices)
             return loss
         else:
             # Compute kl wrt output
             output_latent_batch = output.load_batch(indices)
-            return t.mean(p_out.kl_divergence(output_latent_batch))
+            return t.sum(p_out.kl_divergence(output_latent_batch))/len(indices)
 
     def print_rep(self):
         for latent in self._latents:
             print(latent.fdims)
+
+    def update_end_to_end(self, indices):
+        # Make the updates end to end
+        # There must be cleaner way...
+        # Keep track of latents to update all of them later
+        qs = []
+
+        # Start from top latent
+        latent = self._latents[-1]
+        latent_batch = latent.load_batch(indices, requires_grad=True)
+        qs.append(latent_batch)
+
+        # Compute loss with prior
+        prior = DiagGaussArrayLatentVars.get_normal((latent_batch.n,)+(latent_batch.fdims))
+        loss += t.sum(latent_batch.kl_divergence(prior))/len(indices)
+
+        q_samp = latent_batch.sample()
+
+        while True:
+            # Get outgoing edge
+            edge = self._latent_dep[latent][1]
+            # Get the next latent
+            latent = self._edge_dep[edge][1]
+
+            if latent is self._data:
+                # For the data want to compute log p
+                p = edge.output_likelihood(q_samp)
+                loss -= t.sum(p.log_likelihood(output_data_batch))/len(indices)
+                break
+            else:
+                # Compute next p
+                p = edge.output_likelihood(q_samp)
+                # Get q
+                latent_batch = latent.load_batch(indices, requires_grad=True)
+                qs.append(latent_batch)
+                # Compute kl comparing to q
+                loss += t.sum(latent_batch.kl_divergence(p))/len(indices)
+
+                # Sample from the latent batch
+                q_samp = latent_batch.sample()
+        # Loop over all the latents
+
+        return loss
 
     def update(self, indices, display=False, return_loss=False):
         np.set_printoptions(precision=4)
