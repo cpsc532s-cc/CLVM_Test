@@ -23,8 +23,9 @@ class LSUNData():
         self.bs = bs
         #bedroom_train_set = datasets.LSUN(root='./data', classes=['bedroom_train'], transform=transforms.ToTensor())
         imgs = []
-        for i in range(4):
-            imgs += glob.glob("./data/lsun1/bedroom/0/{}/**/*.jpg".format(i), recursive=True)
+        for i in range(5):
+            imgs += glob.glob("./data/lsun1/bedroom/0/0/{}/*.jpg".format(i), recursive=True)
+        #    imgs += glob.glob("./data/lsun1/bedroom/0/{}/**/*.jpg".format(i), recursive=True)
         print("Loaded data set of size: {}".format(len(imgs)))
         imgs_array = np.zeros((len(imgs), 3, 64, 64),dtype = np.float32)
         for i, img_path in enumerate(imgs):
@@ -60,8 +61,9 @@ class LSUNData():
         return batch
 
     def sample_indices(self):
-        x = np.random.randint(0,self.n//self.bs)
-        return slice(x*self.bs,(x+1)*self.bs)
+        #x = np.random.randint(0,self.n//self.bs)
+        return np.random.randint(0, self.n, size=self.bs)
+        #return slice(x*self.bs,(x+1)*self.bs)
 
     def slice(self, indices):
         return self._data[indices]#.reshape((-1,28,28))
@@ -76,17 +78,41 @@ class LSUNData():
         return np.clip(np.concatenate(image_tup, axis=1)/255, 0, 1)
 
 
+def write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e):
+    #for i,  in enumerate(zip(lp_losses_l, kl_losses_l)):
+    #    (lp_l, kl_l)
+    # Just write the last and the first losses
+    for i in range(len(kl_losses_l[0])):
+        #writer.add_scalars('lsun/loss/lp_loss{}'.format(i),
+        #        {'start': lp_losses_l[0][i],
+        #            'end': lp_losses_l[-1][i]}, iter_n)
+        writer.add_scalars('lsun/loss/kl_loss{}'.format(i),
+                {'start': kl_losses_l[0][i],
+                    'end': kl_losses_l[-1][i]}, iter_n)
+
+    writer.add_scalars('lsun/loss/lp_loss0',
+            {'start': lp_losses_l[0][0],
+                'end': lp_losses_l[-1][0]}, iter_n)
+    t_lp_loss = 0
+    #for i in range(len(lp_losses_l[0])):
+    #t_lp_loss += lp_losses_l[0][i]
+    t_logp = lp_losses_l[-1][0]
+    for i in range(len(kl_losses_l[0])):
+        t_logp += kl_losses_l[-1][i]
+    writer.add_scalar('lsun/loss/logp', -t_logp, iter_n)
+
+
 def main():
     data = LSUNData(64)
     opt_params={"lr":0.02, "b1":0.9, "b2":0.999, "e":1e-8}
     opt_class=AdamLatentOpt
     clvm = CLVM_Stack(data, use_kl = False)
+    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 16, "h_chan": 32, "n_h": 1}, opt_class, opt_params, 0.002)
+    #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 16, "h_chan": 32}, opt_class, opt_params, 0.002)
+    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 16, "h_chan": 32, "n_h": 1}, opt_class, opt_params, 0.002)
+    clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 16}, opt_class, opt_params, 0.002)
     clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 16, "n_h": 2}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 32}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 16, "n_h": 2}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 32}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.ResNetBlock, {"k": 5, "i_chan": 8, "h_chan": 16, "n_h": 2}, opt_class, opt_params, 0.002)
-    clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 32}, opt_class, opt_params, 0.002)
+    clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 16}, opt_class, opt_params, 0.002)
     clvm.stack_latent(m.MLP, {"in_size": 128, "h_size": 256, "n_int":2}, opt_class, opt_params, 0.002)
     #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 1, "i_pad":0, "i_chan": 8, "h_chan": 16}, opt_class, opt_params, 0.01)
     #clvm.stack_latent(m.Deconv2d, {"k": 5, "stride": 2, "i_pad":0, "i_chan": 8, "h_chan": 16}, opt_class, opt_params, 0.01)
@@ -102,7 +128,11 @@ def main():
         indices = data.sample_indices()
         if i%20 == 0:
             lp_losses_l, kl_losses_l, lp_losses_e = clvm.update(indices, display=True, return_loss=True)
-            write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e)
+            write_losses(writer, i, lp_losses_l, kl_losses_l, lp_losses_e)
+
+            l0recon = clvm.reconstruct(range(5), 0)
+            l0recon_means = l0recon.sample().detach().cpu().numpy().reshape((-1,3,64,64)).squeeze()
+            l0recon_img = data.collate_images(l0recon_means)
 
             recon = clvm.reconstruct(range(5), -1)
             recon_means = recon.sample().detach().cpu().numpy().reshape((-1,3,64,64)).squeeze()
@@ -115,7 +145,7 @@ def main():
             samples = sample.sample().detach().cpu().numpy().reshape((-1,3,64,64)).squeeze()
             sample_img = data.collate_images(samples)
 
-            ds.show_img(np.concatenate((recon_img, true_img, sample_img),axis=0))
+            ds.show_img(np.concatenate((l0recon_img, recon_img, true_img, sample_img),axis=0))
         else:
             clvm.update(indices)
 

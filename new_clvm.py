@@ -8,11 +8,12 @@ from torch import FloatTensor
 from variational_methods import *
 import time
 
+import h5py
 import models as m
 
 G_STORE_DEVICE = t.device('cpu')
-#G_COMP_DEVICE = t.device('cuda:0')
-G_COMP_DEVICE = t.device('cpu')
+G_COMP_DEVICE = t.device('cuda:0')
+#G_COMP_DEVICE = t.device('cpu')
 
 def FT(data, device = G_STORE_DEVICE, requires_grad = False):
     return t.tensor(data, device = device, requires_grad = requires_grad)
@@ -93,6 +94,24 @@ class DiagGaussArrayLatentStore:
     def optimizer(self):
         return self._optimizer
 
+    def save_hdf5(self, f):
+        # f can be a hdf5 group
+        # Saving and loading like a dataset 
+        #f = h5py.File(save_path,'x')
+        g_latent = f.create_group("latent")
+        g_latent.create_dataset("mean", data=self.mean)
+        g_latent.create_dataset("log_var", data=self.log_var)
+        # Make a group for the optimizer and hand it over
+        g_optimizer = f.create_group("optimizer")
+        self.optimizer().save_hdf5(g_optimizer)
+        return f
+        
+    def load_hdf5(self, f): 
+        #f = h5py.File(save_path,'r')
+
+        # Also load the optimizer
+
+
 
 class AdamLatentOpt:
     def __init__(self, latent_store, params):
@@ -123,6 +142,8 @@ class AdamLatentOpt:
             b_m0 = self.m0s[k][indices]/(1-b1)
             b_m1 = self.m1s[k][indices]/(1-b2)
             self.latent_store.var_dict[k][indices] -= lr*b_m0/(np.sqrt(b_m1)+e)
+
+    def save_hdf5(self, save_path):
 
 
 class Edge:
@@ -266,6 +287,8 @@ class CLVM_Stack:
         # Keep track of latents to update all of them later
         qs = []
 
+        for edge in self._edges:
+            edge.zero_grad()
         # Start from top latent
         latent = self._latents[-1]
         latent_batch = latent.load_batch(indices, requires_grad=True)
@@ -273,7 +296,9 @@ class CLVM_Stack:
 
         # Compute loss with prior
         prior = DiagGaussArrayLatentVars.get_normal((latent_batch.n,)+(latent_batch.fdims))
-        loss += t.sum(latent_batch.kl_divergence(prior))/len(indices)
+        loss = t.sum(latent_batch.kl_divergence(prior))/len(indices)
+        loss_kl_prior = loss
+        loss_kl_prior = np.asscalar(loss_kl_prior.detach().cpu().numpy())
 
         q_samp = latent_batch.sample()
 
@@ -286,6 +311,7 @@ class CLVM_Stack:
             if latent is self._data:
                 # For the data want to compute log p
                 p = edge.output_likelihood(q_samp)
+                output_data_batch = self._data.load_batch(indices)
                 loss -= t.sum(p.log_likelihood(output_data_batch))/len(indices)
                 break
             else:
@@ -300,8 +326,13 @@ class CLVM_Stack:
                 # Sample from the latent batch
                 q_samp = latent_batch.sample()
         # Loop over all the latents
-
-        return loss
+        loss.backward()
+        for latent in self._latents:
+            latent.optimizer().step()
+        for edge in self._edges:
+            edge.step()
+        loss = np.asscalar(loss.detach().cpu().numpy())
+        return loss, loss_kl_prior
 
     def update(self, indices, display=False, return_loss=False):
         np.set_printoptions(precision=4)
@@ -309,7 +340,7 @@ class CLVM_Stack:
             print("Latent:")
         lp_losses_l = []
         kl_losses_l = []
-        for _ in range(5):
+        for _ in range(3):
             lp_loss_l, kl_loss_l = self.update_latents(indices)
             lp_losses_l.append(lp_loss_l)
             kl_losses_l.append(kl_loss_l)
