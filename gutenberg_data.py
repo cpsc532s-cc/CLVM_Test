@@ -12,8 +12,6 @@ def get_texts(n):
     while i < n:
         try:
             text = strip_headers(load_etext(j)).strip()
-            print(text)
-            print(j)
             books.append(text)
             i += 1
         except:

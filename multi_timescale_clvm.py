@@ -60,7 +60,7 @@ def slice_tuple(x,sl):
     return tuple(out)
 
 class LatentVar(object):
-    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.03, "b1":0.9, "b2":0.999, "e":1e-8}):
+    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.05, "b1":0.9, "b2":0.999, "e":1e-8}):
         self.optimizer = optimizer
         self.params = params
         self.offset = offset
@@ -107,19 +107,19 @@ class LatentVar(object):
         log_var_m1 = self.log_var_m1[x]/(1-b2)
         self.log_var[x] -= lr*log_var_m0/(np.sqrt(log_var_m1)+e)
 
-    def save(self,name,directory):
-        for i in range(len(parameters)):
+    def save(self, name, directory):
+        for i in range(len(self.parameters)):
             f = name + str(i) + ".npy"
             path = os.path.join(directory,f)
             arr = self.__dict__[self.parameters[i]]
-            np.save(os.path.join(directory,path),arr)
+            np.save(path,arr)
 
 
-    def load(self,name,directory):
-        for i in range(len(parameters)):
+    def load(self, name, directory):
+        for i in range(len(self.parameters)):
             f = name + str(i) + ".npy"
             path = os.path.join(directory,f)
-            val = np.load(os.path.join(directory,path))
+            val = np.load(path)
             self.__dict__[self.parameters[i]] = val
 
 
@@ -157,6 +157,50 @@ class MTCLVMManager(object):
             self.mtclvms.append(MultiTimescaleCLVM(data, embedding, layers))
         self.weights = np.array(weights,dtype=np.float32)
 
+    def save(self, directory):
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+
+            f = "layer_param" + str(i) + ".t"
+            path = os.path.join(directory,f)
+            state_dict = layer[3].state_dict()
+            torch.save(state_dict,path)
+
+            f = "layer_opt" + str(i) + ".t"
+            path = os.path.join(directory,f)
+            state_dict = layer[4].state_dict()
+            torch.save(state_dict,path)
+
+        for i in range(len(self.mtclvms)):
+            name = "mtclvm" + str(i)
+            self.mtclvms[i].save(name, directory)
+
+
+    def load(self, directory):
+        for i in range(len(self.layers)):
+            try:
+                layer = self.layers[i]
+
+                f = "layer_param" + str(i) + ".t"
+                path = os.path.join(directory,f)
+                state_dict = torch.load(path)
+                layer[3].load_state_dict(state_dict)
+
+
+                f = "layer_opt" + str(i) + ".t"
+                path = os.path.join(directory,f)
+                state_dict = torch.load(path)
+                layer[4].load_state_dict(state_dict)
+            except:
+                pass
+
+        for i in range(len(self.mtclvms)):
+            try:
+                name = "mtclvm" + str(i)
+                self.mtclvms[i].load(name, directory)
+            except:
+                pass
+
     def update_model(self,model_update_prob = 0.05,layer_index=None, update_layer=None, kl_lambda=1):
         total_weight = np.sum(self.weights)
         data_probs = self.weights / total_weight
@@ -180,6 +224,26 @@ class MTCLVMManager(object):
             loss = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
 
         return loss
+
+    def cheng_update_model(self,layer_index,latent_update_count,kl_lambda=1):
+        total_weight = np.sum(self.weights)
+        data_probs = self.weights / total_weight
+        mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
+        mtclvm = self.mtclvms[mtclvm_index]
+
+        extra = self.update_sizes[layer_index]
+        length =  mtclvm.layers[layer_index][1]
+        index = np.random.random_integers(0, length-extra-1)
+
+        for i in range(latent_update_count):
+            loss2 = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
+        loss1= mtclvm.update_layer(layer_index, index, extra)
+
+        if latent_update_count == 0:
+            return loss1
+        else:
+            return loss2
+
 
     def generate(self, top_len):
         #initialize top layer
@@ -271,6 +335,16 @@ class MultiTimescaleCLVM(object):
             latent_var = LatentVar((latent_length,latent_size),offset=window)
             self.layers.append((offset, curr_length, latent_var, downsampling, window, model, opt))
 
+    def save(self, name, directory):
+        for i in range(len(self.layers)):
+            f = name +"layer" + str(i) 
+            self.layers[i][2].save(f, directory)
+
+    def load(self, name, directory):
+        for i in range(len(self.layers)):
+            f = name +"layer" + str(i) 
+            self.layers[i][2].load(f, directory)
+
     def lp_loss(self, layer, index, extra, compute_grad=True):
         self.val_index_extra(layer, index, extra)
 
@@ -310,7 +384,7 @@ class MultiTimescaleCLVM(object):
         assert prediction[0].shape[1] == bot_extra+window+1
         #Compute loss
         if layer != 0:
-            targets = bot_vals[window:]
+            #targets = bot_vals[window:]
             #log_p = gauss_log_p(prediction,targets)
             #loss = -t.sum(log_p)
             
@@ -438,25 +512,41 @@ class MultiTimescaleCLVM(object):
 
 
 class TopMiniConv(nn.Module):
-    def __init__(self,top_ch,bot_ch):
-        int_ch = 256
+    def __init__(self,top_ch,bot_ch,ar=True):
+        self.ar = ar
+        self.bot_ch = bot_ch
+        int_ch = 512 
         super(TopMiniConv, self).__init__()
         self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,5,dilation=2,)
         self.l2 = nn.Conv1d(int_ch,int_ch,2,dilation=1,)
+        self.l3 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.l4 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.l5 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
+        self.l6 = nn.Conv1d(int_ch,int_ch,1,dilation=1,)
         self.mean = nn.Conv1d(int_ch,bot_ch,5,dilation=1,)
         self.log_var = nn.Conv1d(int_ch,bot_ch,5,dilation=1,)
 
     def forward(self,x):
+        if not self.ar:
+            x[:,:,-self.bot_ch:] = 0
         x = x.permute(0,2,1)
         h1 = f.relu(self.l1(x))
         h2 = f.relu(self.l2(h1))
+        #h3 = f.relu(self.l4(h2))+h2
+        #h4 = f.relu(self.l4(h3))+h3
+        #h5 = f.relu(self.l5(h4))+h4
+        #h6 = f.relu(self.l6(h5))+h5
         mean = self.mean(h2).permute(0,2,1)
         log_var = self.log_var(h2).permute(0,2,1)
+        #print(mean.shape)
+        #print(mean)
         return mean,log_var
 
 class BotMiniConv(nn.Module):
-    def __init__(self,top_ch,bot_ch,bot_out):
-        int_ch = 512 
+    def __init__(self,top_ch,bot_ch,bot_out,ar=True):
+        self.ar = ar
+        self.bot_ch = bot_ch
+        int_ch = 512
         super(BotMiniConv, self).__init__()
         self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,4,dilation=1,)
         self.l2 = nn.Conv1d(int_ch,int_ch,4,dilation=1,)
@@ -467,6 +557,8 @@ class BotMiniConv(nn.Module):
         self.dist = nn.Conv1d(int_ch,bot_out,4,dilation=1,)
 
     def forward(self,x):
+        if not self.ar:
+            x[:,:,-self.bot_ch:] = 0
         x = x.permute(0,2,1)
         h1 = f.relu(self.l1(x))
         h2 = f.relu(self.l2(h1))
@@ -511,48 +603,64 @@ def main():
             total_characters += len(text)
             print(len(text))
     print("Total Characters:", total_characters)
-    mt = TopMiniConv(1,1).cuda()
-    mm = TopMiniConv(1,1).cuda()
-    mb = BotMiniConv(1,256,256).cuda()
+    mt = TopMiniConv(2,2,ar=False).cuda()
+    mm = TopMiniConv(2,2,ar=False).cuda()
+    mb = BotMiniConv(2,256,256,ar=False).cuda()
 
     print("MM Parameters:", count_parameters(mm))
 
     print("MB Parameters:", count_parameters(mb))
 
-    l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.015))
-    l2 = (2, 1, 14, mm, optim.Adam(mm.parameters(),lr=0.001))
+    l3 = (2, 2, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
+    l2 = (2, 2, 14, mm, optim.Adam(mm.parameters(),lr=0.0001))
 
-    l1 = (2, 1, 13, mb, optim.Adam(mb.parameters(),lr=0.001))
+    l1 = (2, 2, 13, mb, optim.Adam(mb.parameters(),lr=0.001))
     
-    layers = [l1,l2]#,l3]
+    layers = [l1,l2,l3]
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
     #embedding = lambda x: FT(np.arange(256)[x,np.newaxis]).cuda()
-    update_sizes = [1024,1024,1000]
+    update_sizes = [1024,1024,1024]
 
 
 
     #clvm = MultiTimescaleCLVM(data, embedding, layers)
     mtclvmm = MTCLVMManager(data, embedding, layers, update_sizes)
 
+    mtclvmm.load("model")
     losses0 = []
     losses1 = []
-    for i in range(40000):
-        lp_loss_0 = mtclvmm.update_model(layer_index=0,update_layer=True)
-        lp_loss_1 = mtclvmm.update_model(layer_index=1,update_layer=True)
-        if i < 20000:
-            kl_lambda = 0#math.cos(math.pi*i/15000)**2
+    losses2 = []
+    losses3 = []
+    for i in range(2000):
+        #lp_loss_1 = mtclvmm.cheng_update_model(1,0)
+        if i < 2500:
+            kl_lambda = 1
+            #kl_lambda = math.cos(math.pi*i/15000)**2
         else:
             kl_lambda = 1
-        for j in range(6):
-            kl_loss_0,lp_loss_0 = mtclvmm.update_model(
-                    layer_index=0,update_layer=False,kl_lambda=kl_lambda)
-        print(i,"\t  \t", lp_loss_0, "\t  \t",  kl_loss_0, "\t  \t", lp_loss_1)
-        #print(i,"\t  \t", lp_loss_0, "\t  \t",opt.param_groups[0]["lr"])
+
+        #kl_loss_0,lp_loss_0 = mtclvmm.cheng_update_model(0,5,kl_lambda=kl_lambda)
+        kl_loss_1,lp_loss_1 = mtclvmm.cheng_update_model(1,5,kl_lambda=kl_lambda)
+        #kl_loss_2,lp_loss_2 = mtclvmm.cheng_update_model(2,1,kl_lambda=kl_lambda)
+
+
+        #string = "{} {:15.2f} {:15.2f} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0,kl_loss_1,kl_loss_2)
+        #string = "{} {:15.2f} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0,kl_loss_1)
+        string = "{} {:15.2f}".format(i, kl_loss_1)
+        #string = "{} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0)
+        print(string)
         if i % 1 == 0:
-            losses0.append(kl_loss_0+lp_loss_0)
-            losses1.append(lp_loss_1)
+            #losses0.append(lp_loss_0)
+            #losses1.append(kl_loss_0)
+            #losses2.append(kl_loss_1)
+            #losses3.append(kl_loss_2)
+            pass
     np.save("loss0.npy", np.array(losses0,dtype=np.float32))
     np.save("loss1.npy", np.array(losses1,dtype=np.float32))
+    #np.save("loss2.npy", np.array(losses2,dtype=np.float32))
+    #np.save("loss3.npy", np.array(losses3,dtype=np.float32))
+
+    mtclvmm.save("model")
 
 
     #print("##############################################")
@@ -565,19 +673,6 @@ def main():
         print(sample)
         print("######################################################")
     print("B")
-
-
-    b, a = butter(3, 0.006, btype='low') 
-    filtered_losses0 = lfilter(b, a, losses0)
-    filtered_losses1 = lfilter(b, a, losses1)
-    print(filtered_losses0)
-
-    plt.plot(losses0[3000:])
-    plt.plot(filtered_losses0[3000:])
-    plt.show()
-    plt.plot(losses1[3000:])
-    plt.plot(filtered_losses1[3000:])
-    plt.show()
 
 if __name__ == "__main__":
     main()
