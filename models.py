@@ -69,7 +69,7 @@ class ResNetBlock(nn.Module):
 
     def forward(self, x):
         h = f.leaky_relu(self.start_block(x))
-        h2 = h 
+        h2 = h
         for lay in self.layers:
             h2 = f.leaky_relu(lay(h2))
         h = h+h2
