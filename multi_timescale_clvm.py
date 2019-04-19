@@ -1,5 +1,6 @@
 import numpy as np
 import math
+import pdb
 np.cat = np.concatenate
 np.random.seed(100)
 import torch as t 
@@ -60,7 +61,7 @@ def slice_tuple(x,sl):
     return tuple(out)
 
 class LatentVar(object):
-    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.05, "b1":0.9, "b2":0.999, "e":1e-8}):
+    def __init__(self, dim, offset=0, optimizer="adam", params={"lr":0.01, "b1":0.9, "b2":0.999, "e":1e-8}):
         self.optimizer = optimizer
         self.params = params
         self.offset = offset
@@ -201,29 +202,28 @@ class MTCLVMManager(object):
             except:
                 pass
 
-    def update_model(self,model_update_prob = 0.05,layer_index=None, update_layer=None, kl_lambda=1):
+    def update_model(self,layer_index,latent_update_count,kl_lambda=1):
+        extra = self.update_sizes[layer_index]
         total_weight = np.sum(self.weights)
         data_probs = self.weights / total_weight
+
+        for i in range(latent_update_count):
+            mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
+            mtclvm = self.mtclvms[mtclvm_index]
+            length =  mtclvm.layers[layer_index][1]
+            index = np.random.random_integers(0, length-extra-1)
+            loss2 = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
+
         mtclvm_index = np.random.choice(np.arange(len(self.mtclvms)),p=data_probs)
         mtclvm = self.mtclvms[mtclvm_index]
-        if layer_index == None:
-            layer_probs = np.array([2**(-i) for i in range(len(self.layers))],dtype=np.float32)
-            layer_index = np.random.choice(np.arange(len(self.layers)),p=layer_probs/np.sum(layer_probs))
-        else:
-            layer_index = layer_index
-        extra = self.update_sizes[layer_index]
         length =  mtclvm.layers[layer_index][1]
         index = np.random.random_integers(0, length-extra-1)
-        if update_layer == True:
-            loss = mtclvm.update_layer(layer_index, index, extra)
-        elif update_layer == False:
-            loss = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
-        elif np.random.rand() < model_update_prob:
-            loss = mtclvm.update_layer(layer_index, index, extra)
-        else:
-            loss = mtclvm.update_latent(layer_index, index, extra, kl_lambda=kl_lambda)
+        loss1 = mtclvm.update_layer(layer_index, index, extra)
 
-        return loss
+        if latent_update_count == 0:
+            return loss1
+        else:
+            return loss2
 
     def cheng_update_model(self,layer_index,latent_update_count,kl_lambda=1):
         total_weight = np.sum(self.weights)
@@ -266,8 +266,8 @@ class MTCLVMManager(object):
             bot_len = top_len * top_ds 
             top_input = t.zeros((top_window+bot_len,top_size)).cuda()
             top_input[top_window % top_ds::top_ds,:] = top_latent[-(top_window // top_ds+top_len):]
-            bot_latent = t.zeros((bot_len + bot_offset,top_size)).cuda()
-            bot_latent_offset_dist = t.zeros((bot_offset,top_size)).cuda(),t.zeros((bot_offset,top_size)).cuda()
+            bot_latent = t.zeros((bot_len + bot_offset,bot_size)).cuda()
+            bot_latent_offset_dist = t.zeros((bot_offset,bot_size)).cuda(),t.zeros((bot_offset,bot_size)).cuda()
 
             bot_latent[:bot_offset,:] = gauss_samp(bot_latent_offset_dist)
 
@@ -515,7 +515,7 @@ class TopMiniConv(nn.Module):
     def __init__(self,top_ch,bot_ch,ar=True):
         self.ar = ar
         self.bot_ch = bot_ch
-        int_ch = 512 
+        int_ch = 512
         super(TopMiniConv, self).__init__()
         self.l1 = nn.Conv1d(top_ch+bot_ch,int_ch,5,dilation=2,)
         self.l2 = nn.Conv1d(int_ch,int_ch,2,dilation=1,)
@@ -530,12 +530,12 @@ class TopMiniConv(nn.Module):
         if not self.ar:
             x[:,:,-self.bot_ch:] = 0
         x = x.permute(0,2,1)
-        h1 = f.relu(self.l1(x))
-        h2 = f.relu(self.l2(h1))
-        #h3 = f.relu(self.l4(h2))+h2
-        #h4 = f.relu(self.l4(h3))+h3
-        #h5 = f.relu(self.l5(h4))+h4
-        #h6 = f.relu(self.l6(h5))+h5
+        h1 = f.leaky_relu(self.l1(x))
+        h2 = f.leaky_relu(self.l2(h1))
+        h3 = f.leaky_relu(self.l4(h2))+h2
+        h4 = f.leaky_relu(self.l4(h3))+h3
+        h5 = f.leaky_relu(self.l5(h4))+h4
+        h6 = f.leaky_relu(self.l6(h5))+h5
         mean = self.mean(h2).permute(0,2,1)
         log_var = self.log_var(h2).permute(0,2,1)
         #print(mean.shape)
@@ -603,18 +603,18 @@ def main():
             total_characters += len(text)
             print(len(text))
     print("Total Characters:", total_characters)
-    mt = TopMiniConv(2,2,ar=False).cuda()
-    mm = TopMiniConv(2,2,ar=False).cuda()
-    mb = BotMiniConv(2,256,256,ar=False).cuda()
+    mt = TopMiniConv(1,2,ar=False).cuda()
+    mm = TopMiniConv(2,3,ar=False).cuda()
+    mb = BotMiniConv(3,256,256,ar=False).cuda()
 
     print("MM Parameters:", count_parameters(mm))
 
     print("MB Parameters:", count_parameters(mb))
 
-    l3 = (2, 2, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
+    l3 = (2, 1, 14, mt, optim.Adam(mt.parameters(),lr=0.0001))
     l2 = (2, 2, 14, mm, optim.Adam(mm.parameters(),lr=0.0001))
 
-    l1 = (2, 2, 13, mb, optim.Adam(mb.parameters(),lr=0.001))
+    l1 = (2, 3, 13, mb, optim.Adam(mb.parameters(),lr=0.0001))
     
     layers = [l1,l2,l3]
     embedding = lambda x: FT(np.eye(256)[x]).cuda()
@@ -631,34 +631,33 @@ def main():
     losses1 = []
     losses2 = []
     losses3 = []
-    for i in range(2000):
-        #lp_loss_1 = mtclvmm.cheng_update_model(1,0)
-        if i < 2500:
-            kl_lambda = 1
+    for i in range(15000):
+        if i < 40000:
+            kl_lambda = 0.0
             #kl_lambda = math.cos(math.pi*i/15000)**2
         else:
             kl_lambda = 1
 
-        #kl_loss_0,lp_loss_0 = mtclvmm.cheng_update_model(0,5,kl_lambda=kl_lambda)
+        kl_loss_0,lp_loss_0 = mtclvmm.cheng_update_model(0,5,kl_lambda=kl_lambda)
         kl_loss_1,lp_loss_1 = mtclvmm.cheng_update_model(1,5,kl_lambda=kl_lambda)
-        #kl_loss_2,lp_loss_2 = mtclvmm.cheng_update_model(2,1,kl_lambda=kl_lambda)
+        kl_loss_2,lp_loss_2 = mtclvmm.cheng_update_model(2,3,kl_lambda=kl_lambda)
 
 
-        #string = "{} {:15.2f} {:15.2f} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0,kl_loss_1,kl_loss_2)
+        string = "{} {:15.2f} {:15.2f} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0,kl_loss_1,kl_loss_2)
         #string = "{} {:15.2f} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0,kl_loss_1)
-        string = "{} {:15.2f}".format(i, kl_loss_1)
+        #string = "{} {:15.2f}".format(i, kl_loss_1)
         #string = "{} {:15.2f} {:15.2f}".format(i,lp_loss_0,kl_loss_0)
         print(string)
         if i % 1 == 0:
-            #losses0.append(lp_loss_0)
-            #losses1.append(kl_loss_0)
-            #losses2.append(kl_loss_1)
-            #losses3.append(kl_loss_2)
+            losses0.append(lp_loss_0)
+            losses1.append(kl_loss_0)
+            losses2.append(kl_loss_1)
+            losses3.append(kl_loss_2)
             pass
     np.save("loss0.npy", np.array(losses0,dtype=np.float32))
     np.save("loss1.npy", np.array(losses1,dtype=np.float32))
-    #np.save("loss2.npy", np.array(losses2,dtype=np.float32))
-    #np.save("loss3.npy", np.array(losses3,dtype=np.float32))
+    np.save("loss2.npy", np.array(losses2,dtype=np.float32))
+    np.save("loss3.npy", np.array(losses3,dtype=np.float32))
 
     mtclvmm.save("model")
 
