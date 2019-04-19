@@ -68,14 +68,17 @@ class LSUNData():
     def slice(self, indices):
         return self._data[indices]#.reshape((-1,28,28))
 
-    def collate_images(self, image_batch):
+    def collate_images(self, image_batch, return_float=False):
         # Unconvert
         image_batch = image_batch.transpose((0,2,3,1))*self.std+self.mean
         # hstack
         image_tup = ()
         for image in image_batch:
             image_tup += (image,)
-        return np.clip(np.concatenate(image_tup, axis=1)/255, 0, 1)
+        if return_float:
+            return np.clip(np.concatenate(image_tup, axis=1)/255, 0, 1)
+        else:
+            return np.clip(np.concatenate(image_tup, axis=1), 0, 255).astype(np.uint8)
 
 
 def write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e):
@@ -96,13 +99,14 @@ def write_losses(writer, iter_n, lp_losses_l, kl_losses_l, lp_losses_e):
     t_lp_loss = 0
     #for i in range(len(lp_losses_l[0])):
     #t_lp_loss += lp_losses_l[0][i]
-    t_logp = lp_losses_l[-1][0]
+    t_logp = -lp_losses_l[-1][0]
     for i in range(len(kl_losses_l[0])):
         t_logp += kl_losses_l[-1][i]
-    writer.add_scalar('lsun/loss/logp', -t_logp, iter_n)
+    writer.add_scalar('lsun/loss/logp', t_logp, iter_n)
 
 
 def main():
+    print("What the fuck")
     data = LSUNData(64)
     opt_params={"lr":0.02, "b1":0.9, "b2":0.999, "e":1e-8}
     opt_class=AdamLatentOpt
@@ -126,7 +130,15 @@ def main():
     writer = SummaryWriter()
     for i in range(50000):
         indices = data.sample_indices()
+        #if (i+1)%200 == 0:
+            #clvm.save("checkpoints/lsun1/")
+            
         if i%20 == 0:
+            print(i)
+            #if os.path.isfile(latent_path):
+            #    if input() == 'y':
+            #        load_type = 'w'
+
             lp_losses_l, kl_losses_l, lp_losses_e = clvm.update(indices, display=True, return_loss=True)
             write_losses(writer, i, lp_losses_l, kl_losses_l, lp_losses_e)
 
@@ -149,8 +161,6 @@ def main():
             sample_img = np.concatenate((l0recon_img, recon_img, true_img, sample_img),axis=0)
             im = Image.fromarray(sample_img)
             im.save("temp.png")
-
-            clvm.save("checkpoints/lsun1/")
         else:
             clvm.update(indices)
 

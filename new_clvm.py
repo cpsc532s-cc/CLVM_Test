@@ -8,6 +8,7 @@ from torch import FloatTensor
 
 from variational_methods import *
 import time
+import os
 
 import h5py
 import models as m
@@ -147,13 +148,13 @@ class AdamLatentOpt:
             self.latent_store.var_dict[k][indices] -= lr*b_m0/(np.sqrt(b_m1)+e)
 
     def save_hdf5(self, f):
-        for k in latent_store.var_dict:
+        for k in self.latent_store.var_dict:
             g_k = f.create_group(k)
-            g_k.create_dataset("m0", self.m0s[k])
-            g_k.create_dataset("m1", self.m1s[k])
+            g_k.create_dataset("m0", data=self.m0s[k])
+            g_k.create_dataset("m1", data=self.m1s[k])
 
     def load_hdf5(self, f):
-        for k in latent_store.var_dict:
+        for k in self.latent_store.var_dict:
             g_k = f[k]
             self.m0s[k] = g_k["m0"].value
             self.m1s[k] = g_k["m1"].value
@@ -420,6 +421,7 @@ class CLVM_Stack:
         return self.decode_from_sample(prior.sample(), -1)
 
     def save(self, dir_path):
+        print("wtf")
         # Create compressed torch file for the edges
         edges_param_dict = {}
         for i, edge in enumerate(self._edges):
@@ -427,7 +429,8 @@ class CLVM_Stack:
         t.save(edges_param_dict, os.path.join(dir_path, "edges.pth"))
 
         # Create hdf5 for the latents
-        with h5py.File(os.path.join(dir_path, "latents.hdf5"),'x') as f:
+        latent_path = os.path.join(dir_path, "latents.hdf5")
+        with h5py.File(latent_path,'w') as f:
             for i, latent in enumerate(self._latents):
                 g_i = f.create_group(str(i))
                 latent.save_hdf5(g_i)
