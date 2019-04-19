@@ -122,7 +122,7 @@ def main():
     #clvm.stack_latent(m.MLP, {"in_size": 8, "h_size": 16}, opt_class, opt_params, 0.001)
     clvm.print_rep()
 
-    ds = DisplayStream()
+    #ds = DisplayStream()
     writer = SummaryWriter()
     for i in range(50000):
         indices = data.sample_indices()
@@ -145,7 +145,12 @@ def main():
             samples = sample.sample().detach().cpu().numpy().reshape((-1,3,64,64)).squeeze()
             sample_img = data.collate_images(samples)
 
-            ds.show_img(np.concatenate((l0recon_img, recon_img, true_img, sample_img),axis=0))
+            #ds.show_img(np.concatenate((l0recon_img, recon_img, true_img, sample_img),axis=0))
+            sample_img = np.concatenate((l0recon_img, recon_img, true_img, sample_img),axis=0)
+            im = Image.fromarray(sample_img)
+            im.save("temp.png")
+
+            clvm.save("checkpoints/lsun1/")
         else:
             clvm.update(indices)
 

@@ -1,4 +1,5 @@
 import numpy as np
+np.random.seed(7)
 import torch as t
 import torch.nn as nn
 import torch.nn.functional as f
@@ -96,8 +97,7 @@ class DiagGaussArrayLatentStore:
 
     def save_hdf5(self, f):
         # f can be a hdf5 group
-        # Saving and loading like a dataset 
-        #f = h5py.File(save_path,'x')
+        # Saving and loading like a dataset
         g_latent = f.create_group("latent")
         g_latent.create_dataset("mean", data=self.mean)
         g_latent.create_dataset("log_var", data=self.log_var)
@@ -105,12 +105,15 @@ class DiagGaussArrayLatentStore:
         g_optimizer = f.create_group("optimizer")
         self.optimizer().save_hdf5(g_optimizer)
         return f
-        
-    def load_hdf5(self, f): 
+
+    def load_hdf5(self, f):
         #f = h5py.File(save_path,'r')
+        g_latent = f["latent"]
+        self.mean = g_latent["mean"].value
+        self.log_var = g_latent["log_var"].value
 
         # Also load the optimizer
-
+        self.optimizer().load_hdf5(f["optimizer"])
 
 
 class AdamLatentOpt:
@@ -143,7 +146,17 @@ class AdamLatentOpt:
             b_m1 = self.m1s[k][indices]/(1-b2)
             self.latent_store.var_dict[k][indices] -= lr*b_m0/(np.sqrt(b_m1)+e)
 
-    def save_hdf5(self, save_path):
+    def save_hdf5(self, f):
+        for k in latent_store.var_dict:
+            g_k = f.create_group(k)
+            g_k.create_dataset("m0", self.m0s[k])
+            g_k.create_dataset("m1", self.m1s[k])
+
+    def load_hdf5(self, f):
+        for k in latent_store.var_dict:
+            g_k = f[k]
+            self.m0s[k] = g_k["m0"].value
+            self.m1s[k] = g_k["m1"].value
 
 
 class Edge:
@@ -170,6 +183,14 @@ class Edge:
 
     def zero_grad(self):
         self._optim.zero_grad()
+
+    def state_dict(self):
+        return {"model": self.model.state_dict(),
+                "optimizer": self._optim.state_dict()}
+
+    def load_state_dict(self, state_dict):
+        self.model.load_state_dict(state_dict)
+        self._optim.load_state_dict(state_dict)
 
 
 class CLVM_Stack:
@@ -397,6 +418,32 @@ class CLVM_Stack:
         top_fdims = self._latents[-1].fdims
         prior = DiagGaussArrayLatentVars.get_normal((num,)+(top_fdims))
         return self.decode_from_sample(prior.sample(), -1)
+
+    def save(self, dir_path):
+        # Create compressed torch file for the edges
+        edges_param_dict = {}
+        for i, edge in enumerate(self._edges):
+            edges_param_dict[i] = edge.state_dict()
+        t.save(edges_param_dict, os.path.join(dir_path, "edges.pth"))
+
+        # Create hdf5 for the latents
+        with h5py.File(os.path.join(dir_path, "latents.hdf5"),'x') as f:
+            for i, latent in enumerate(self._latents):
+                g_i = f.create_group(str(i))
+                latent.save_hdf5(g_i)
+
+    def load(self, dir_path):
+        # Load torch file for the edges
+        edges_param_dict = t.load(os.path.join(dir_path, "edges.pth"))
+        for i, edge in enumerate(self._edges):
+            edge.load_state_dict(edges_param_dict[i])
+
+        # Load hdf5 for the latents
+        with h5py.File(os.path.join(dir_path, "latents.hdf5"),'r') as f:
+            for i, latent in enumerate(self._latents):
+                g_i = f[str(i)]
+                latent.load_hdf5(g_i)
+
 
 """
 def main():
